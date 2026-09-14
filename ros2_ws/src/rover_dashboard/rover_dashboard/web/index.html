@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Rover Control — Live Dashboard</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="scene">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <div class="brand-text">
+        <span class="brand-title">MINE ROVER</span>
+        <span class="brand-sub">Telemetry &amp; Control</span>
+      </div>
+    </div>
+
+    <div class="topbar-status">
+      <span class="dot" id="linkDot"></span>
+      <span id="linkText">Connecting…</span>
+    </div>
+
+    <button class="icon-btn" id="settingsBtn" title="Customize dashboard" aria-label="Customize dashboard">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 8.5A3.5 3.5 0 1 0 12 15.5 3.5 3.5 0 0 0 12 8.5zm9 3.02c0-.34-.03-.66-.07-.98l2.02-1.6a.5.5 0 0 0 .12-.63l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.38.96a7.6 7.6 0 0 0-1.7-.98l-.36-2.53a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.53c-.62.24-1.2.57-1.7.98l-2.38-.96a.5.5 0 0 0-.6.22L2.9 8.31a.5.5 0 0 0 .12.63l2.02 1.6c-.04.32-.07.65-.07.98s.03.66.07.98l-2.02 1.6a.5.5 0 0 0-.12.63l1.92 3.32c.13.22.4.31.6.22l2.38-.96c.5.41 1.08.74 1.7.98l.36 2.53a.5.5 0 0 0 .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.53c.62-.24 1.2-.57 1.7-.98l2.38.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.63l-2.02-1.6c.04-.32.07-.64.07-.98z"/></svg>
+    </button>
+  </header>
+
+  <main id="grid" class="grid">
+
+    <section class="panel glass" data-panel="live_feed" data-title="Live Feed">
+      <header class="panel-head" draggable="true">
+        <h2>Live Feed</h2>
+        <span class="badge" data-badge="live_feed">no signal</span>
+      </header>
+      <div class="panel-body feed-body">
+        <img id="liveFeedImg" alt="Live camera feed" />
+        <div class="feed-placeholder" id="liveFeedPlaceholder">Waiting for live_feed…</div>
+      </div>
+    </section>
+
+    <section class="panel glass" data-panel="thermal_feed" data-title="Thermal Feed">
+      <header class="panel-head" draggable="true">
+        <h2>Thermal Feed</h2>
+        <span class="badge" data-badge="thermal_feed">no signal</span>
+      </header>
+      <div class="panel-body feed-body">
+        <img id="thermalFeedImg" alt="Thermal camera feed" />
+        <div class="feed-placeholder" id="thermalFeedPlaceholder">Waiting for thermal_feed…</div>
+      </div>
+    </section>
+
+    <section class="panel glass" data-panel="temperature" data-title="Temperature">
+      <header class="panel-head" draggable="true">
+        <h2>Temperature</h2>
+        <span class="badge" data-badge="temperature">--</span>
+      </header>
+      <div class="panel-body gauge-body">
+        <svg class="gauge" viewBox="0 0 160 100" id="gauge-temperature">
+          <path class="gauge-track" d="M15,90 A70,70 0 0 1 145,90" />
+          <path class="gauge-fill" d="M15,90 A70,70 0 0 1 145,90" />
+        </svg>
+        <div class="gauge-readout">
+          <span class="gauge-value" id="val-temperature">--</span>
+          <span class="gauge-unit">°C</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel glass" data-panel="humidity" data-title="Humidity">
+      <header class="panel-head" draggable="true">
+        <h2>Humidity</h2>
+        <span class="badge" data-badge="humidity">--</span>
+      </header>
+      <div class="panel-body gauge-body">
+        <svg class="gauge" viewBox="0 0 160 100" id="gauge-humidity">
+          <path class="gauge-track" d="M15,90 A70,70 0 0 1 145,90" />
+          <path class="gauge-fill" d="M15,90 A70,70 0 0 1 145,90" />
+        </svg>
+        <div class="gauge-readout">
+          <span class="gauge-value" id="val-humidity">--</span>
+          <span class="gauge-unit">%RH</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel glass" data-panel="gas_reading" data-title="Gas Reading">
+      <header class="panel-head" draggable="true">
+        <h2>Gas Reading</h2>
+        <span class="badge" data-badge="gas_reading">--</span>
+      </header>
+      <div class="panel-body gauge-body">
+        <svg class="gauge gauge-alert" viewBox="0 0 160 100" id="gauge-gas_reading">
+          <path class="gauge-track" d="M15,90 A70,70 0 0 1 145,90" />
+          <path class="gauge-fill" d="M15,90 A70,70 0 0 1 145,90" />
+        </svg>
+        <div class="gauge-readout">
+          <span class="gauge-value" id="val-gas_reading">--</span>
+          <span class="gauge-unit">ppm</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel glass radar-panel" data-panel="left_radar" data-title="Left Ultrasonic">
+      <header class="panel-head" draggable="true">
+        <h2>Left Ultrasonic</h2>
+        <span class="badge" data-badge="left_distance">--</span>
+      </header>
+      <div class="panel-body radar-body">
+        <div class="radar-display radar-left" id="leftRadarDisplay">
+          <div class="radar-grid"></div>
+          <div class="radar-sweep"></div>
+          <div class="radar-blip" id="leftRadarBlip"></div>
+          <div class="radar-center-dot"></div>
+        </div>
+        <div class="radar-readout">
+          <span class="radar-value" id="leftRadarValue">--</span>
+          <span class="radar-unit">cm</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel glass radar-panel" data-panel="right_radar" data-title="Right Ultrasonic">
+      <header class="panel-head" draggable="true">
+        <h2>Right Ultrasonic</h2>
+        <span class="badge" data-badge="right_distance">--</span>
+      </header>
+      <div class="panel-body radar-body">
+        <div class="radar-display radar-right" id="rightRadarDisplay">
+          <div class="radar-grid"></div>
+          <div class="radar-sweep"></div>
+          <div class="radar-blip" id="rightRadarBlip"></div>
+          <div class="radar-center-dot"></div>
+        </div>
+        <div class="radar-readout">
+          <span class="radar-value" id="rightRadarValue">--</span>
+          <span class="radar-unit">cm</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel glass telemetry-panel" data-panel="central_telemetry" data-title="Rover Telemetry">
+      <header class="panel-head" draggable="true">
+        <h2>Rover Telemetry</h2>
+        <span class="badge" data-badge="status">waiting</span>
+      </header>
+      <div class="panel-body telemetry-body">
+        <div class="telemetry-grid">
+          <div class="telemetry-item"><span>Left distance</span><b id="val-left_distance">--</b><small>cm</small></div>
+          <div class="telemetry-item"><span>Right distance</span><b id="val-right_distance">--</b><small>cm</small></div>
+          <div class="telemetry-item"><span>Gas alarm</span><b id="val-gas_status">--</b><small>digital</small></div>
+          <div class="telemetry-item"><span>Speed mode</span><b id="val-speed_mode">--</b><small>mode</small></div>
+          <div class="telemetry-item"><span>Left motor</span><b id="val-motor_left">--</b><small>output</small></div>
+          <div class="telemetry-item"><span>Right motor</span><b id="val-motor_right">--</b><small>output</small></div>
+        </div>
+        <p class="telemetry-status" id="val-status">Waiting for rover status...</p>
+      </div>
+    </section>
+
+    <section class="panel glass" data-panel="joystick_values" data-title="Joystick">
+      <header class="panel-head" draggable="true">
+        <h2>Joystick</h2>
+        <span class="badge" data-badge="joystick_values">idle</span>
+      </header>
+      <div class="panel-body joystick-body">
+        <canvas id="joystickCanvas" width="220" height="220"></canvas>
+        <div class="joy-readout">
+          <div><span>X</span><b id="joyX">0.00</b></div>
+          <div><span>Y</span><b id="joyY">0.00</b></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Settings / customize panel -->
+<div class="settings-overlay" id="settingsOverlay">
+  <div class="settings-panel glass">
+    <header class="panel-head">
+      <h2>Customize Dashboard</h2>
+      <button class="icon-btn" id="closeSettings" aria-label="Close">✕</button>
+    </header>
+    <div class="settings-body">
+      <p class="settings-hint">Drag panels by their title bar to rearrange. Toggle visibility or resize the columns for your screen.</p>
+
+      <div class="settings-group">
+        <h3>Panel visibility</h3>
+        <div id="visibilityToggles" class="toggle-list"></div>
+      </div>
+
+      <div class="settings-group">
+        <h3>Layout density</h3>
+        <div class="segmented" id="densitySeg">
+          <button data-density="compact">Compact</button>
+          <button data-density="comfortable" class="active">Comfortable</button>
+          <button data-density="spacious">Spacious</button>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <h3>Alert thresholds</h3>
+        <label class="field-row">Gas warning (ppm)
+          <input type="number" id="gasThreshold" value="400" />
+        </label>
+        <label class="field-row">Temp warning (°C)
+          <input type="number" id="tempThreshold" value="45" />
+        </label>
+      </div>
+
+      <div class="settings-actions">
+        <button class="btn" id="resetLayoutBtn">Reset layout</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
