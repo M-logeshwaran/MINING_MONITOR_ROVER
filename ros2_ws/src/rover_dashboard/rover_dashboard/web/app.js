@@ -21,6 +21,7 @@ const defaultSettings = {
     "humidity",
     "gas_reading",
     "central_telemetry",
+    "navigation_state",
     "joystick_values",
   ],
   hidden: [],
@@ -251,6 +252,7 @@ document.getElementById("resetLayoutBtn").addEventListener("click", () => {
 const socket = io();
 const linkDot = document.getElementById("linkDot");
 const linkText = document.getElementById("linkText");
+let sensorsBlocked = false;
 
 socket.on("connect", () => {
   linkDot.classList.add("connected");
@@ -268,12 +270,37 @@ function setBadge(key, text, level) {
   badge.className = "badge" + (level ? ` ${level}` : "");
 }
 
+const pendingUi = new Map();
+let uiFrameScheduled = false;
+
+function queueUiUpdate(key, update) {
+  pendingUi.set(key, update);
+  if (uiFrameScheduled) return;
+  uiFrameScheduled = true;
+  requestAnimationFrame(() => {
+    uiFrameScheduled = false;
+    const updates = Array.from(pendingUi.values());
+    pendingUi.clear();
+    updates.forEach((update) => update());
+  });
+}
+
 /* ---- feeds ---- */
 function bindFeed(event, imgId, placeholderId) {
   const img = document.getElementById(imgId);
+  let latestFrame = null;
+  let frameScheduled = false;
   socket.on(event, (msg) => {
-    img.src = msg.data_uri;
-    img.classList.add("has-frame");
+    latestFrame = msg.data_uri;
+    if (!frameScheduled) {
+      frameScheduled = true;
+      requestAnimationFrame(() => {
+        frameScheduled = false;
+        if (!latestFrame) return;
+        img.src = latestFrame;
+        img.classList.add("has-frame");
+      });
+    }
     setBadge(event, "live", "live");
   });
   let staleTimer = null;
@@ -305,9 +332,15 @@ function updateGauge(key, value) {
   setBadge(key, text, level);
 }
 
-socket.on("temperature", (msg) => updateGauge("temperature", msg.value));
-socket.on("humidity", (msg) => updateGauge("humidity", msg.value));
-socket.on("gas_reading", (msg) => updateGauge("gas_reading", msg.value));
+socket.on("temperature", (msg) => {
+  if (!sensorsBlocked) queueUiUpdate("temperature", () => updateGauge("temperature", msg.value));
+});
+socket.on("humidity", (msg) => {
+  if (!sensorsBlocked) queueUiUpdate("humidity", () => updateGauge("humidity", msg.value));
+});
+socket.on("gas_reading", (msg) => {
+  if (!sensorsBlocked) queueUiUpdate("gas_reading", () => updateGauge("gas_reading", msg.value));
+});
 
 function updateTelemetryValue(key, value, formatter = (item) => item) {
   const element = document.getElementById(`val-${key}`);
@@ -337,32 +370,102 @@ function updateRadar(sensorKey, value, maxRange = 50) {
 }
 
 socket.on("gas_status", (msg) => {
-  const alarm = Number(msg.value) !== 0;
-  updateTelemetryValue("gas_status", alarm ? "ALARM" : "CLEAR");
-  setBadge("status", alarm ? "gas alarm" : "online", alarm ? "alert" : "live");
+  if (sensorsBlocked) return;
+  queueUiUpdate("gas_status", () => {
+    const alarm = Number(msg.value) !== 0;
+    updateTelemetryValue("gas_status", alarm ? "ALARM" : "CLEAR");
+    setBadge("status", alarm ? "gas alarm" : "online", alarm ? "alert" : "live");
+  });
 });
 socket.on("left_distance", (msg) => {
-  const rawValue = Number(msg.value) || 0;
-  const value = rawValue > 50 ? 50 : rawValue;
-  const displayLabel = rawValue > 50 ? "50+" : value.toFixed(1);
-  updateTelemetryValue("left_distance", displayLabel);
-  updateRadar("left", rawValue, 50);
-  setBadge("left_distance", rawValue > 50 ? "50+ cm" : `${value.toFixed(0)} cm`, value < 50 ? "warn" : "live");
+  if (sensorsBlocked) return;
+  queueUiUpdate("left_distance", () => {
+    const rawValue = Number(msg.value) || 0;
+    const value = rawValue > 50 ? 50 : rawValue;
+    const displayLabel = rawValue > 50 ? "50+" : value.toFixed(1);
+    updateTelemetryValue("left_distance", displayLabel);
+    updateRadar("left", rawValue, 50);
+    setBadge("left_distance", rawValue > 50 ? "50+ cm" : `${value.toFixed(0)} cm`, value < 50 ? "warn" : "live");
+  });
 });
 socket.on("right_distance", (msg) => {
-  const rawValue = Number(msg.value) || 0;
-  const value = rawValue > 50 ? 50 : rawValue;
-  const displayLabel = rawValue > 50 ? "50+" : value.toFixed(1);
-  updateTelemetryValue("right_distance", displayLabel);
-  updateRadar("right", rawValue, 50);
-  setBadge("right_distance", rawValue > 50 ? "50+ cm" : `${value.toFixed(0)} cm`, value < 50 ? "warn" : "live");
+  if (sensorsBlocked) return;
+  queueUiUpdate("right_distance", () => {
+    const rawValue = Number(msg.value) || 0;
+    const value = rawValue > 50 ? 50 : rawValue;
+    const displayLabel = rawValue > 50 ? "50+" : value.toFixed(1);
+    updateTelemetryValue("right_distance", displayLabel);
+    updateRadar("right", rawValue, 50);
+    setBadge("right_distance", rawValue > 50 ? "50+ cm" : `${value.toFixed(0)} cm`, value < 50 ? "warn" : "live");
+  });
 });
-socket.on("speed_mode", (msg) => updateTelemetryValue("speed_mode", msg.value));
-socket.on("motor_left", (msg) => updateTelemetryValue("motor_left", msg.value));
-socket.on("motor_right", (msg) => updateTelemetryValue("motor_right", msg.value));
+socket.on("speed_mode", (msg) => queueUiUpdate("speed_mode", () => updateTelemetryValue("speed_mode", msg.value)));
+socket.on("motor_left", (msg) => queueUiUpdate("motor_left", () => updateTelemetryValue("motor_left", msg.value)));
+socket.on("motor_right", (msg) => queueUiUpdate("motor_right", () => updateTelemetryValue("motor_right", msg.value)));
 socket.on("status", (msg) => {
-  updateTelemetryValue("status", msg.value);
-  setBadge("status", "online", "live");
+  queueUiUpdate("status", () => {
+    updateTelemetryValue("status", msg.value);
+    setBadge("status", "online", "live");
+  });
+});
+
+function setNavigationBadge(text, level = null) {
+  setBadge("navigation_state", text, level);
+}
+
+socket.on("full_control", (msg) => {
+  const active = Boolean(msg.active);
+  sensorsBlocked = active;
+  updateTelemetryValue("full_control", active ? "ON" : "OFF");
+  if (active) {
+    ["temperature", "humidity", "gas_reading", "gas_status", "left_distance", "right_distance"].forEach((key) => {
+      updateTelemetryValue(key, "--");
+      setBadge(key, "blocked", "warn");
+    });
+    setBadge("status", "sensors blocked", "warn");
+  }
+  setNavigationBadge(active ? "FULL CONTROL" : "NORMAL", active ? "alert" : "live");
+});
+
+socket.on("rollback_status", (msg) => {
+  const parts = String(msg.value || "").split("|");
+  const status = parts[0] || "IDLE";
+  const progressPart = parts.find((part) => part.startsWith("progress="));
+  const progress = progressPart ? Number.parseFloat(progressPart.split("=", 2)[1]) : 0;
+  updateTelemetryValue("rollback_status", status);
+  updateTelemetryValue("rollback_progress", `${Number.isFinite(progress) ? progress.toFixed(1) : "0.0"}%`);
+  if (status.includes("ACTIVE") || status.includes("RETURN")) {
+    setNavigationBadge("ROLLBACK", "warn");
+  }
+});
+
+socket.on("autonomous_status", (msg) => {
+  const status = String(msg.value || "MANUAL");
+  updateTelemetryValue("autonomous_status", status);
+  if (status.includes("ACTIVE") || status.includes("DRIVING") || status.includes("ALIGNING") || status.includes("APPROACH")) {
+    setNavigationBadge("AUTONOMOUS", "live");
+  }
+});
+
+socket.on("odom", (msg) => {
+  queueUiUpdate("odom", () => {
+    const x = Number(msg.x) || 0;
+    const y = Number(msg.y) || 0;
+    const yaw = Number(msg.yaw) || 0;
+    updateTelemetryValue("pose", `${x.toFixed(2)}, ${y.toFixed(2)}`);
+    updateTelemetryValue("heading", (yaw * 180 / Math.PI).toFixed(1));
+  });
+});
+
+socket.on("path", (msg) => {
+  const points = Array.isArray(msg.points) ? msg.points : [];
+  let length = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const dx = Number(points[index].x) - Number(points[index - 1].x);
+    const dy = Number(points[index].y) - Number(points[index - 1].y);
+    length += Math.hypot(dx, dy);
+  }
+  queueUiUpdate("path", () => updateTelemetryValue("path_length", length.toFixed(2)));
 });
 
 /* ---- joystick ---- */
@@ -411,11 +514,16 @@ function drawJoystick(x, y) {
 }
 drawJoystick(0, 0);
 
+let latestJoystick = null;
 socket.on("joystick_values", (msg) => {
-  const x = msg.axes && msg.axes.length > 0 ? msg.axes[0] : 0;
-  const y = msg.axes && msg.axes.length > 1 ? msg.axes[1] : 0;
-  drawJoystick(x, y);
-  joyXEl.textContent = x.toFixed(2);
-  joyYEl.textContent = y.toFixed(2);
-  setBadge("joystick_values", "active", "live");
+  latestJoystick = msg;
+  queueUiUpdate("joystick", () => {
+    const frame = latestJoystick;
+    const x = frame.axes && frame.axes.length > 0 ? frame.axes[0] : 0;
+    const y = frame.axes && frame.axes.length > 1 ? frame.axes[1] : 0;
+    drawJoystick(x, y);
+    joyXEl.textContent = x.toFixed(2);
+    joyYEl.textContent = y.toFixed(2);
+    setBadge("joystick_values", "active", "live");
+  });
 });

@@ -1,176 +1,287 @@
+/*
+  ==============================================================
+  DRILLPULSE ROVER - FINAL PRIORITY / NON-BLOCKING CONTROLLER
+  ==============================================================
+
+  PURPOSE
+  -------
+  Designed for Arduino Uno + HC-05 + SoftwareSerial.
+
+  Priority:
+    1. Bluetooth motor commands
+    2. Motor safety
+    3. Non-blocking sensors
+    4. Sensor telemetry when command traffic is idle
+
+  IMPORTANT:
+    Arduino Uno is single-core and SoftwareSerial is not true
+    hardware full-duplex. This sketch therefore gives incoming
+    motor commands priority over outgoing sensor telemetry.
+
+  NO delay()
+  NO pulseIn()
+  NO readStringUntil()
+  NO blocking Bluetooth parser
+
+  ==============================================================
+  HARDWARE
+  ==============================================================
+
+  HC-05:
+    TXD -> Arduino D10
+    RXD -> Arduino D11
+    VCC -> 5V
+    GND -> GND
+
+  MQ-4:
+    Analog  -> A0
+    Digital -> D2
+
+  DHT22:
+    DATA -> A1
+
+  LEFT ULTRASONIC:
+    TRIG -> A2
+    ECHO -> A3
+
+  RIGHT ULTRASONIC:
+    TRIG -> A4
+    ECHO -> A5
+
+  MOTORS:
+    M1 = Front Left
+    M2 = Rear Left
+    M3 = Front Right
+    M4 = Rear Right
+
+  ==============================================================
+  SPEED MODES
+  ==============================================================
+
+    0 = SLOW   = 40%
+    1 = NORMAL = 70%
+    2 = TURBO  = 100%
+
+  ==============================================================
+  COMMAND PROTOCOL
+  ==============================================================
+
+  Preferred:
+    <CMD,seq,x,y,speed>
+
+  Example:
+    <CMD,125,0.000,1.000,2>
+
+  Current ROS2 protocol is also accepted:
+    CMD,seq,x,y,speed\n
+
+  Also accepted:
+    CMD,x,y,speed\n
+
+  ==============================================================
+  SENSOR TELEMETRY
+  ==============================================================
+
+  S,TEMP,HUMIDITY,MQ4_ANALOG,MQ4_DIGITAL,LEFT_DISTANCE,RIGHT_DISTANCE\n
+
+  Example:
+    S,0.00,0.00,60,0,12.4,9.8
+
+  ==============================================================
+  MOTOR SAFETY
+  ==============================================================
+
+  A valid movement command continuously refreshes the watchdog.
+
+  If the PC/Bluetooth stops producing valid commands while the
+  rover is moving, the Arduino forces RELEASE after
+  MOTOR_FAILSAFE_MS.
+
+  STOP command:
+    <CMD,seq,0.000,0.000,speed>
+
+  immediately releases all motors.
+
+  ==============================================================
+*/
 
 #include <AFMotor_R4.h>
 #include <DHT.h>
 #include <SoftwareSerial.h>
-
-// ============================================================
-// DRILLPULSE REALTIME ARDUINO CONTROLLER
-// ============================================================
-//
-// HC-05
-// TXD -> Arduino D10
-// RXD -> Arduino D11
-//
-// IMPORTANT:
-// Arduino receives movement commands immediately.
-// No readStringUntil().
-// No blocking Bluetooth command parser.
-//
-// ============================================================
-
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
 
 // ============================================================
 // BLUETOOTH
 // ============================================================
 
-SoftwareSerial Bluetooth(10, 11);   // RX, TX
-
+SoftwareSerial Bluetooth(10, 11);  // RX, TX
 const unsigned long BT_BAUD = 9600;
-
-
-// ============================================================
-// MOTORS
-// ============================================================
-
-AF_DCMotor motor1(1);   // Front Left
-AF_DCMotor motor2(2);   // Rear Left
-AF_DCMotor motor3(3);   // Front Right
-AF_DCMotor motor4(4);   // Rear Right
-
-
-// ============================================================
-// MOTOR SETTINGS
-// ============================================================
-
-const int MAX_PWM = 255;
-
-// 0 = SLOW
-// 1 = NORMAL
-// 2 = TURBO
-
-int speedMode = 1;
-
-const float SPEED_SLOW   = 0.40;
-const float SPEED_NORMAL = 0.70;
-const float SPEED_TURBO  = 1.00;
-
-
-// ============================================================
-// MOTOR DIRECTION
-// ============================================================
-
-bool INVERT_M1 = false;
-bool INVERT_M2 = false;
-bool INVERT_M3 = false;
-bool INVERT_M4 = false;
-
-
-// ============================================================
-// REALTIME COMMAND SAFETY
-// ============================================================
-
-// If laptop stops sending commands, motors stop.
-// 250 ms gives responsive safety without making normal control jittery.
-
-const unsigned long COMMAND_TIMEOUT = 250;
-
-unsigned long lastCommandTime = 0;
-
 
 // ============================================================
 // SENSOR PINS
 // ============================================================
 
-// MQ4
-#define MQ4_PIN A0
-#define MQ4_DO_PIN 2
+#define MQ4_ANALOG   A0
+#define MQ4_DIGITAL  2
 
-// DHT22
-#define DHT_PIN A1
-#define DHT_TYPE DHT22
+#define DHTPIN       A1
+#define DHTTYPE      DHT22
 
-DHT dht(DHT_PIN, DHT_TYPE);
+#define LEFT_TRIG    A2
+#define LEFT_ECHO    A3
 
+#define RIGHT_TRIG   A4
+#define RIGHT_ECHO   A5
 
-// LEFT ULTRASONIC
-#define LEFT_TRIG_PIN A2
-#define LEFT_ECHO_PIN A3
-
-// RIGHT ULTRASONIC
-#define RIGHT_TRIG_PIN A4
-#define RIGHT_ECHO_PIN A5
-
+DHT dht(DHTPIN, DHTTYPE);
 
 // ============================================================
-// SENSOR TIMING
+// MOTORS
 // ============================================================
 
-// Sensor packet every 500 ms
-const unsigned long SENSOR_INTERVAL = 500;
-
-// DHT22 only needs about 2 seconds
-const unsigned long DHT_INTERVAL = 2000;
-
-unsigned long lastSensorTime = 0;
-unsigned long lastDHTTime = 0;
-
+AF_DCMotor motor1(1);  // Front Left
+AF_DCMotor motor2(2);  // Rear Left
+AF_DCMotor motor3(3);  // Front Right
+AF_DCMotor motor4(4);  // Rear Right
 
 // ============================================================
-// ULTRASONIC
+// SPEED MODES
 // ============================================================
 
-// 12 ms ~= about 2 meters.
-// Much shorter than the old 30 ms timeout.
+enum SpeedMode : uint8_t
+{
+  SPEED_SLOW   = 0,
+  SPEED_NORMAL = 1,
+  SPEED_TURBO  = 2
+};
 
-const unsigned long ULTRASONIC_TIMEOUT = 12000;
+SpeedMode currentSpeedMode = SPEED_NORMAL;
 
+const uint8_t PWM_SLOW   = 102;
+const uint8_t PWM_NORMAL = 178;
+const uint8_t PWM_TURBO  = 255;
+
+// ============================================================
+// GLOBAL TIMERS
+// ============================================================
+
+const unsigned long SENSOR_UPDATE_MS = 50;
+const unsigned long TELEMETRY_MS = 100;
+const unsigned long DHT_UPDATE_MS = 2000;
+const unsigned long DEBUG_UPDATE_MS = 2000;
+
+/*
+  This is ONLY the emergency motor timeout.
+
+  It is deliberately much shorter than 1 second so a disconnected
+  controller cannot leave the rover driving.
+
+  It must still be longer than the normal ROS2 moving keepalive.
+*/
+const unsigned long MOTOR_FAILSAFE_MS = 450;
+
+/*
+  Do not add a post-command quiet period. RX is serviced first on every
+  loop, and telemetry checks for waiting command bytes before transmitting.
+*/
+const unsigned long COMMAND_TRAFFIC_IDLE_MS = 0;
+
+unsigned long lastValidCommandMs = 0;
+unsigned long lastCommandActivityMs = 0;
+
+unsigned long lastSensorUpdateMs = 0;
+unsigned long lastTelemetryMs = 0;
+unsigned long lastDhtUpdateMs = 0;
+unsigned long lastDebugMs = 0;
 
 // ============================================================
 // SENSOR VALUES
 // ============================================================
 
-int mq4AnalogValue = 0;
-int mq4DigitalValue = 0;
+float temperature = 0.0f;
+float humidity = 0.0f;
 
-float temperature = 0.0;
-float humidity = 0.0;
+int mq4Analog = 0;
+int mq4Digital = 0;
 
-float leftDistance = -1.0;
-float rightDistance = -1.0;
+float leftDistance = -1.0f;
+float rightDistance = -1.0f;
 
-
-// ============================================================
-// BLUETOOTH INPUT BUFFER
-// ============================================================
-
-// IMPORTANT:
-// We do NOT use String.
-// We do NOT use readStringUntil().
-//
-// This parser receives one character at a time and immediately
-// processes a complete command.
-
-const int BT_BUFFER_SIZE = 40;
-
-char btBuffer[BT_BUFFER_SIZE];
-byte btIndex = 0;
-
+bool dhtValid = false;
 
 // ============================================================
-// SPEED
+// DRIVE STATE
 // ============================================================
 
-float getSpeedMultiplier()
+float commandX = 0.0f;
+float commandY = 0.0f;
+
+bool motorsRunning = false;
+bool movementActive = false;
+bool fullControlActive = false;
+
+// ============================================================
+// BLUETOOTH RX BUFFER
+// ============================================================
+
+const uint8_t RX_BUFFER_SIZE = 80;
+
+char rxBuffer[RX_BUFFER_SIZE];
+uint8_t rxIndex = 0;
+
+bool framedMode = false;
+bool legacyMode = false;
+
+// ============================================================
+// NON-BLOCKING ULTRASONIC STATE MACHINE
+// ============================================================
+
+enum UltraState : uint8_t
 {
-  if (speedMode == 0)
-    return SPEED_SLOW;
+  ULTRA_IDLE = 0,
 
-  if (speedMode == 1)
-    return SPEED_NORMAL;
+  LEFT_TRIGGER,
+  LEFT_WAIT_RISE,
+  LEFT_WAIT_FALL,
 
-  return SPEED_TURBO;
+  RIGHT_TRIGGER,
+  RIGHT_WAIT_RISE,
+  RIGHT_WAIT_FALL
+};
+
+UltraState ultraState = ULTRA_IDLE;
+
+unsigned long ultraTimerUs = 0;
+unsigned long echoStartUs = 0;
+unsigned long nextUltraUs = 0;
+
+const unsigned long ULTRA_TRIGGER_US = 10;
+const unsigned long ULTRA_TIMEOUT_US = 8000;
+const unsigned long ULTRA_GAP_US = 700;
+
+// ============================================================
+// SPEED -> PWM
+// ============================================================
+
+int getSpeedPWM()
+{
+  switch (currentSpeedMode)
+  {
+    case SPEED_SLOW:
+      return PWM_SLOW;
+
+    case SPEED_NORMAL:
+      return PWM_NORMAL;
+
+    case SPEED_TURBO:
+      return PWM_TURBO;
+
+    default:
+      return PWM_NORMAL;
+  }
 }
-
 
 // ============================================================
 // STOP MOTORS
@@ -178,468 +289,929 @@ float getSpeedMultiplier()
 
 void stopMotors()
 {
+  motor1.setSpeed(0);
+  motor2.setSpeed(0);
+  motor3.setSpeed(0);
+  motor4.setSpeed(0);
+
   motor1.run(RELEASE);
   motor2.run(RELEASE);
   motor3.run(RELEASE);
   motor4.run(RELEASE);
+
+  motorsRunning = false;
+  movementActive = false;
 }
 
-
 // ============================================================
-// SET MOTOR
+// APPLY MOTOR COMMAND
 // ============================================================
 
-void setMotor(
-  AF_DCMotor &motor,
-  float command,
-  bool inverted
-)
+void applyMotorCommand(float x, float y)
 {
-  command = constrain(command, -1.0, 1.0);
+  const float DEADZONE = 0.15f;
 
-  if (inverted)
-    command = -command;
+  if (fabs(x) < DEADZONE)
+    x = 0.0f;
 
-  command *= getSpeedMultiplier();
+  if (fabs(y) < DEADZONE)
+    y = 0.0f;
 
-  int pwm = (int)(abs(command) * MAX_PWM);
+  // ----------------------------------------------------------
+  // STOP
+  // ----------------------------------------------------------
 
-  pwm = constrain(pwm, 0, 255);
-
-  if (pwm == 0)
+  if (x == 0.0f && y == 0.0f)
   {
-    motor.run(RELEASE);
+    stopMotors();
     return;
   }
 
-  motor.setSpeed(pwm);
+  int pwm = getSpeedPWM();
 
-  if (command > 0)
-    motor.run(FORWARD);
-  else
-    motor.run(BACKWARD);
-}
-
-
-// ============================================================
-// DRIVE
-// ============================================================
-
-void drive(float x, float y)
-{
   // ----------------------------------------------------------
   // FORWARD
   // ----------------------------------------------------------
 
-  if (y > 0.5)
+  if (y > 0.5f && fabs(x) < 0.5f)
   {
-    setMotor(motor1,  1.0, INVERT_M1);
-    setMotor(motor2,  1.0, INVERT_M2);
-    setMotor(motor3,  1.0, INVERT_M3);
-    setMotor(motor4,  1.0, INVERT_M4);
+    motor1.setSpeed(pwm);
+    motor2.setSpeed(pwm);
+    motor3.setSpeed(pwm);
+    motor4.setSpeed(pwm);
+
+    motor1.run(FORWARD);
+    motor2.run(FORWARD);
+    motor3.run(FORWARD);
+    motor4.run(FORWARD);
+
+    motorsRunning = true;
+    movementActive = true;
+    return;
   }
 
   // ----------------------------------------------------------
   // BACKWARD
   // ----------------------------------------------------------
 
-  else if (y < -0.5)
+  if (y < -0.5f && fabs(x) < 0.5f)
   {
-    setMotor(motor1, -1.0, INVERT_M1);
-    setMotor(motor2, -1.0, INVERT_M2);
-    setMotor(motor3, -1.0, INVERT_M3);
-    setMotor(motor4, -1.0, INVERT_M4);
+    motor1.setSpeed(pwm);
+    motor2.setSpeed(pwm);
+    motor3.setSpeed(pwm);
+    motor4.setSpeed(pwm);
+
+    motor1.run(BACKWARD);
+    motor2.run(BACKWARD);
+    motor3.run(BACKWARD);
+    motor4.run(BACKWARD);
+
+    motorsRunning = true;
+    movementActive = true;
+    return;
   }
 
   // ----------------------------------------------------------
   // RIGHT
   // ----------------------------------------------------------
 
-  else if (x > 0.5)
+  if (x > 0.5f && fabs(y) < 0.5f)
   {
-    setMotor(motor1,  1.0, INVERT_M1);
-    setMotor(motor2,  1.0, INVERT_M2);
+    motor1.setSpeed(pwm);
+    motor2.setSpeed(pwm);
+    motor3.setSpeed(pwm);
+    motor4.setSpeed(pwm);
 
-    setMotor(motor3, -1.0, INVERT_M3);
-    setMotor(motor4, -1.0, INVERT_M4);
+    motor1.run(FORWARD);
+    motor2.run(FORWARD);
+    motor3.run(BACKWARD);
+    motor4.run(BACKWARD);
+
+    motorsRunning = true;
+    movementActive = true;
+    return;
   }
 
   // ----------------------------------------------------------
   // LEFT
   // ----------------------------------------------------------
 
-  else if (x < -0.5)
+  if (x < -0.5f && fabs(y) < 0.5f)
   {
-    setMotor(motor1, -1.0, INVERT_M1);
-    setMotor(motor2, -1.0, INVERT_M2);
+    motor1.setSpeed(pwm);
+    motor2.setSpeed(pwm);
+    motor3.setSpeed(pwm);
+    motor4.setSpeed(pwm);
 
-    setMotor(motor3,  1.0, INVERT_M3);
-    setMotor(motor4,  1.0, INVERT_M4);
+    motor1.run(BACKWARD);
+    motor2.run(BACKWARD);
+    motor3.run(FORWARD);
+    motor4.run(FORWARD);
+
+    motorsRunning = true;
+    movementActive = true;
+    return;
   }
 
   // ----------------------------------------------------------
-  // STOP
+  // DIFFERENTIAL / MIXED
   // ----------------------------------------------------------
 
+  float leftPower = constrain(y + x, -1.0f, 1.0f);
+  float rightPower = constrain(y - x, -1.0f, 1.0f);
+
+  int leftPWM = (int)(fabs(leftPower) * pwm);
+  int rightPWM = (int)(fabs(rightPower) * pwm);
+
+  motor1.setSpeed(leftPWM);
+  motor2.setSpeed(leftPWM);
+  motor3.setSpeed(rightPWM);
+  motor4.setSpeed(rightPWM);
+
+  if (leftPower > DEADZONE)
+  {
+    motor1.run(FORWARD);
+    motor2.run(FORWARD);
+  }
+  else if (leftPower < -DEADZONE)
+  {
+    motor1.run(BACKWARD);
+    motor2.run(BACKWARD);
+  }
   else
   {
-    stopMotors();
+    motor1.run(RELEASE);
+    motor2.run(RELEASE);
   }
-}
 
-
-// ============================================================
-// SEND SPEED ACK
-// ============================================================
-
-void sendSpeedStatus()
-{
-  Bluetooth.print("SPEED:");
-
-  if (speedMode == 0)
-    Bluetooth.println("SLOW");
-
-  else if (speedMode == 1)
-    Bluetooth.println("NORMAL");
-
+  if (rightPower > DEADZONE)
+  {
+    motor3.run(FORWARD);
+    motor4.run(FORWARD);
+  }
+  else if (rightPower < -DEADZONE)
+  {
+    motor3.run(BACKWARD);
+    motor4.run(BACKWARD);
+  }
   else
-    Bluetooth.println("TURBO");
+  {
+    motor3.run(RELEASE);
+    motor4.run(RELEASE);
+  }
+
+  motorsRunning = (leftPWM > 0 || rightPWM > 0);
+  movementActive = motorsRunning;
 }
 
-
 // ============================================================
-// PROCESS SPEED
+// FLOAT PARSER
 // ============================================================
 
-void processSpeedCommand(char *command)
+bool parseFloatField(const char *text, float &value)
 {
-  // Expected:
-  //
-  // SPEED,0
-  // SPEED,1
-  // SPEED,2
+  if (text == NULL || *text == '\0')
+    return false;
 
-  int mode = atoi(command + 6);
+  char *endPtr = NULL;
 
-  if (mode >= 0 && mode <= 2)
-  {
-    speedMode = mode;
+  value = (float)strtod(text, &endPtr);
 
-    sendSpeedStatus();
+  if (endPtr == text)
+    return false;
 
-    Bluetooth.print("ACK,SPEED,");
-    Bluetooth.println(speedMode);
-  }
+  if (*endPtr != '\0')
+    return false;
+
+  if (!isfinite(value))
+    return false;
+
+  return true;
 }
 
-
 // ============================================================
-// PROCESS MOVEMENT
+// COMMAND PARSER
+//
+// Accepts:
+//
+//   CMD,x,y,speed
+//
+//   CMD,seq,x,y,speed
+//
 // ============================================================
 
-void processCommand(char *command)
+bool parseFullControl(char *frame)
 {
-  if (command == NULL)
-    return;
+  if (strncmp(frame, "FULL,", 5) != 0)
+    return false;
 
-  if (command[0] == '\0')
-    return;
+  char *endPtr = NULL;
+  long mode = strtol(frame + 5, &endPtr, 10);
 
+  if (endPtr == frame + 5 || *endPtr != '\0' || (mode != 0 && mode != 1))
+    return false;
 
-  // ----------------------------------------------------------
-  // SPEED
-  // ----------------------------------------------------------
+  bool wasFullControlActive = fullControlActive;
+  fullControlActive = (mode == 1);
+  unsigned long now = millis();
+  lastCommandActivityMs = now;
 
-  if (strncmp(command, "SPEED,", 6) == 0)
+  if (fullControlActive != wasFullControlActive)
   {
-    processSpeedCommand(command);
-    return;
+    // Discard the complete sensor snapshot so FC cannot leak old readings.
+    temperature = 0.0f;
+    humidity = 0.0f;
+    mq4Analog = 0;
+    mq4Digital = 0;
+    leftDistance = -1.0f;
+    rightDistance = -1.0f;
+    dhtValid = false;
+    lastTelemetryMs = now;
   }
 
+  if (fullControlActive)
+    ultraState = ULTRA_IDLE;
 
-  // ----------------------------------------------------------
-  // MOVEMENT
-  // ----------------------------------------------------------
-
-  if (strncmp(command, "CMD,", 4) == 0)
-  {
-    char *comma = strchr(command + 4, ',');
-
-    if (comma == NULL)
-      return;
-
-    *comma = '\0';
-
-    float x = atof(command + 4);
-    float y = atof(comma + 1);
-
-    x = constrain(x, -1.0, 1.0);
-    y = constrain(y, -1.0, 1.0);
-
-    // CRITICAL:
-    // Drive immediately.
-
-    drive(x, y);
-
-    // Refresh safety timer immediately.
-
-    lastCommandTime = millis();
-
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // RESET
-  // ----------------------------------------------------------
-
-  if (strcmp(command, "RESET") == 0)
-  {
-    stopMotors();
-
-    speedMode = 1;
-
-    lastCommandTime = millis();
-
-    Bluetooth.println("ARDUINO RESET: OK");
-
-    return;
-  }
-
-
-  // ----------------------------------------------------------
-  // UNKNOWN COMMAND
-  // ----------------------------------------------------------
-
-  // Do NOT spam Bluetooth with error packets.
-  //
-  // This is intentionally ignored.
-  //
-  // Spamming ERROR packets can make a realtime control link
-  // even worse.
-
+  Serial.print("FULL_CONTROL=");
+  Serial.println(fullControlActive ? "ON" : "OFF");
+  return true;
 }
 
-
-// ============================================================
-// REALTIME BLUETOOTH RECEIVER
-// ============================================================
-
-void processBluetooth()
+bool parseCommand(char *frame)
 {
-  // Process EVERY available byte immediately.
+  if (strncmp(frame, "CMD,", 4) != 0)
+    return false;
 
-  while (Bluetooth.available() > 0)
+  char work[RX_BUFFER_SIZE];
+
+  strncpy(work, frame + 4, RX_BUFFER_SIZE - 1);
+  work[RX_BUFFER_SIZE - 1] = '\0';
+
+  char *fields[5];
+  uint8_t count = 0;
+
+  char *token = strtok(work, ",");
+
+  while (token != NULL && count < 5)
   {
-    char c = Bluetooth.read();
+    fields[count++] = token;
+    token = strtok(NULL, ",");
+  }
+
+  // Too many fields.
+  if (token != NULL)
+    return false;
+
+  float x = 0.0f;
+  float y = 0.0f;
+  long speed = -1;
+
+  // ----------------------------------------------------------
+  // CMD,x,y,speed
+  // ----------------------------------------------------------
+
+  if (count == 3)
+  {
+    if (!parseFloatField(fields[0], x))
+      return false;
+
+    if (!parseFloatField(fields[1], y))
+      return false;
+
+    char *endPtr = NULL;
+
+    speed = strtol(fields[2], &endPtr, 10);
+
+    if (endPtr == fields[2] || *endPtr != '\0')
+      return false;
+  }
+
+  // ----------------------------------------------------------
+  // CMD,seq,x,y,speed
+  // ----------------------------------------------------------
+
+  else if (count == 4)
+  {
+    char *endPtr = NULL;
+
+    long sequence = strtol(fields[0], &endPtr, 10);
+
+    if (endPtr == fields[0] || *endPtr != '\0')
+      return false;
+
+    (void)sequence;
+
+    if (!parseFloatField(fields[1], x))
+      return false;
+
+    if (!parseFloatField(fields[2], y))
+      return false;
+
+    endPtr = NULL;
+
+    speed = strtol(fields[3], &endPtr, 10);
+
+    if (endPtr == fields[3] || *endPtr != '\0')
+      return false;
+  }
+  else
+  {
+    return false;
+  }
+
+  // ----------------------------------------------------------
+  // SPEED VALIDATION
+  // ----------------------------------------------------------
+
+  if (speed < 0 || speed > 2)
+    return false;
+
+  // ----------------------------------------------------------
+  // STORE
+  // ----------------------------------------------------------
+
+  commandX = constrain(x, -1.0f, 1.0f);
+  commandY = constrain(y, -1.0f, 1.0f);
+
+  currentSpeedMode = (SpeedMode)speed;
+
+  unsigned long now = millis();
+
+  lastValidCommandMs = now;
+  lastCommandActivityMs = now;
+
+  // ----------------------------------------------------------
+  // APPLY IMMEDIATELY
+  // ----------------------------------------------------------
+
+  applyMotorCommand(commandX, commandY);
+
+  // ----------------------------------------------------------
+  // USB DIAGNOSTIC
+  // ----------------------------------------------------------
+
+  Serial.print("RX_OK x=");
+  Serial.print(commandX, 3);
+
+  Serial.print(" y=");
+  Serial.print(commandY, 3);
+
+  Serial.print(" speed=");
+  Serial.print((int)currentSpeedMode);
+
+  Serial.print(" pwm=");
+  Serial.print(getSpeedPWM());
+
+  Serial.print(" moving=");
+  Serial.print(movementActive ? 1 : 0);
+
+  Serial.print(" t=");
+  Serial.println(now);
+
+  return true;
+}
+
+// ============================================================
+// BLUETOOTH RECEIVE
+//
+// Framed protocol:
+//   <CMD,...>
+//
+// Compatibility:
+//   CMD,...\n
+//
+// Incoming data is handled one byte at a time.
+// ============================================================
+
+void serviceBluetoothRx()
+{
+  while (Bluetooth.available())
+  {
+    char c = (char)Bluetooth.read();
+
+    lastCommandActivityMs = millis();
 
     // --------------------------------------------------------
-    // Newline = complete command
+    // START MARKER
     // --------------------------------------------------------
 
-    if (c == '\n' || c == '\r')
+    if (c == '<')
     {
-      if (btIndex > 0)
+      framedMode = true;
+      legacyMode = false;
+      rxIndex = 0;
+      rxBuffer[0] = '\0';
+
+      continue;
+    }
+
+    // --------------------------------------------------------
+    // FRAMED MODE
+    // --------------------------------------------------------
+
+    if (framedMode)
+    {
+      if (c == '>')
       {
-        btBuffer[btIndex] = '\0';
+        rxBuffer[rxIndex] = '\0';
 
-        processCommand(btBuffer);
+        bool ok = (strncmp(rxBuffer, "FULL,", 5) == 0)
+              ? parseFullControl(rxBuffer)
+              : parseCommand(rxBuffer);
 
-        btIndex = 0;
+        if (!ok)
+        {
+          Serial.print("RX_FRAME_BAD <");
+          Serial.print(rxBuffer);
+          Serial.println(">");
+        }
+
+        framedMode = false;
+        rxIndex = 0;
+
+        continue;
+      }
+
+      if (rxIndex < RX_BUFFER_SIZE - 1)
+      {
+        rxBuffer[rxIndex++] = c;
+      }
+      else
+      {
+        rxIndex = 0;
+        framedMode = false;
+
+        Serial.println("RX_FRAME_OVERFLOW");
       }
 
       continue;
     }
 
-
     // --------------------------------------------------------
-    // Store character
+    // LEGACY MODE
+    // Only begins on 'C', reducing random garbage parsing.
     // --------------------------------------------------------
 
-    if (btIndex < BT_BUFFER_SIZE - 1)
+    if (!legacyMode)
     {
-      btBuffer[btIndex++] = c;
+      if (c == 'C' || c == 'F')
+      {
+        legacyMode = true;
+        rxIndex = 0;
+        rxBuffer[rxIndex++] = c;
+      }
+
+      continue;
     }
-    else
-    {
-      // Buffer overflow.
-      // Drop corrupted command.
 
-      btIndex = 0;
+    // --------------------------------------------------------
+
+    if (legacyMode)
+    {
+      if (c == '\n' || c == '\r')
+      {
+        if (rxIndex > 0)
+        {
+          rxBuffer[rxIndex] = '\0';
+
+          bool ok = (strncmp(rxBuffer, "FULL,", 5) == 0)
+                      ? parseFullControl(rxBuffer)
+                      : parseCommand(rxBuffer);
+
+          if (!ok)
+          {
+            Serial.print("RX_LEGACY_BAD ");
+            Serial.println(rxBuffer);
+          }
+        }
+
+        legacyMode = false;
+        rxIndex = 0;
+
+        continue;
+      }
+
+      if (rxIndex < RX_BUFFER_SIZE - 1)
+      {
+        rxBuffer[rxIndex++] = c;
+      }
+      else
+      {
+        legacyMode = false;
+        rxIndex = 0;
+
+        Serial.println("RX_LEGACY_OVERFLOW");
+      }
     }
   }
 }
 
-
 // ============================================================
-// ULTRASONIC
+// NON-BLOCKING ULTRASONIC
+//
+// No pulseIn().
+// No delay().
 // ============================================================
 
-float readUltrasonic(
-  int trigPin,
-  int echoPin
-)
+void serviceUltrasonic()
 {
-  digitalWrite(trigPin, LOW);
+  unsigned long nowUs = micros();
 
-  delayMicroseconds(2);
+  switch (ultraState)
+  {
+    // --------------------------------------------------------
+    // START LEFT
+    // --------------------------------------------------------
 
-  digitalWrite(trigPin, HIGH);
+    case ULTRA_IDLE:
 
-  delayMicroseconds(10);
+      if ((long)(nowUs - nextUltraUs) >= 0)
+      {
+        digitalWrite(LEFT_TRIG, HIGH);
 
-  digitalWrite(trigPin, LOW);
+        ultraTimerUs = nowUs;
 
+        ultraState = LEFT_TRIGGER;
+      }
 
-  unsigned long duration =
-    pulseIn(
-      echoPin,
-      HIGH,
-      ULTRASONIC_TIMEOUT
-    );
+      break;
 
+    // --------------------------------------------------------
+    // LEFT TRIGGER
+    // --------------------------------------------------------
 
-  if (duration == 0)
-    return -1.0;
+    case LEFT_TRIGGER:
 
+      if ((unsigned long)(nowUs - ultraTimerUs) >=
+          ULTRA_TRIGGER_US)
+      {
+        digitalWrite(LEFT_TRIG, LOW);
 
-  float distance =
-    duration * 0.0343 / 2.0;
+        ultraTimerUs = nowUs;
 
+        ultraState = LEFT_WAIT_RISE;
+      }
 
-  if (distance < 2.0 || distance > 500.0)
-    return -1.0;
+      break;
 
+    // --------------------------------------------------------
+    // LEFT WAIT RISE
+    // --------------------------------------------------------
 
-  return distance;
+    case LEFT_WAIT_RISE:
+
+      if (digitalRead(LEFT_ECHO) == HIGH)
+      {
+        echoStartUs = micros();
+
+        ultraState = LEFT_WAIT_FALL;
+      }
+      else if ((unsigned long)(nowUs - ultraTimerUs) >=
+               ULTRA_TIMEOUT_US)
+      {
+        leftDistance = -1.0f;
+
+        nextUltraUs = micros() + ULTRA_GAP_US;
+
+        ultraState = RIGHT_TRIGGER;
+      }
+
+      break;
+
+    // --------------------------------------------------------
+    // LEFT WAIT FALL
+    // --------------------------------------------------------
+
+    case LEFT_WAIT_FALL:
+
+      if (digitalRead(LEFT_ECHO) == LOW)
+      {
+        unsigned long pulseWidth =
+            micros() - echoStartUs;
+
+        float distance =
+            pulseWidth * 0.0343f / 2.0f;
+
+        if (distance >= 2.0f && distance <= 300.0f)
+          leftDistance = distance;
+        else
+          leftDistance = -1.0f;
+
+        nextUltraUs = micros() + ULTRA_GAP_US;
+
+        ultraState = RIGHT_TRIGGER;
+      }
+      else if ((unsigned long)(nowUs - echoStartUs) >=
+               ULTRA_TIMEOUT_US)
+      {
+        leftDistance = -1.0f;
+
+        nextUltraUs = micros() + ULTRA_GAP_US;
+
+        ultraState = RIGHT_TRIGGER;
+      }
+
+      break;
+
+    // --------------------------------------------------------
+    // START RIGHT
+    // --------------------------------------------------------
+
+    case RIGHT_TRIGGER:
+
+      if ((long)(nowUs - nextUltraUs) >= 0)
+      {
+        digitalWrite(RIGHT_TRIG, HIGH);
+
+        ultraTimerUs = nowUs;
+
+        ultraState = RIGHT_WAIT_RISE;
+      }
+
+      break;
+
+    // --------------------------------------------------------
+    // END RIGHT TRIGGER
+    // --------------------------------------------------------
+
+    case RIGHT_WAIT_RISE:
+
+      if ((unsigned long)(nowUs - ultraTimerUs) >=
+          ULTRA_TRIGGER_US)
+      {
+        digitalWrite(RIGHT_TRIG, LOW);
+
+        ultraTimerUs = nowUs;
+        echoStartUs = 0;
+
+        ultraState = RIGHT_WAIT_FALL;
+      }
+
+      break;
+
+    // --------------------------------------------------------
+    // RIGHT ECHO
+    // --------------------------------------------------------
+
+    case RIGHT_WAIT_FALL:
+
+      // Waiting for echo rising edge.
+      if (echoStartUs == 0)
+      {
+        if (digitalRead(RIGHT_ECHO) == HIGH)
+        {
+          echoStartUs = micros();
+        }
+        else if ((unsigned long)(nowUs - ultraTimerUs) >=
+                 ULTRA_TIMEOUT_US)
+        {
+          rightDistance = -1.0f;
+
+          nextUltraUs = micros() + ULTRA_GAP_US;
+
+          ultraState = ULTRA_IDLE;
+        }
+      }
+      else
+      {
+        // Waiting for echo falling edge.
+        if (digitalRead(RIGHT_ECHO) == LOW)
+        {
+          unsigned long pulseWidth =
+              micros() - echoStartUs;
+
+          float distance =
+              pulseWidth * 0.0343f / 2.0f;
+
+          if (distance >= 2.0f && distance <= 300.0f)
+            rightDistance = distance;
+          else
+            rightDistance = -1.0f;
+
+          echoStartUs = 0;
+
+          nextUltraUs = micros() + ULTRA_GAP_US;
+
+          ultraState = ULTRA_IDLE;
+        }
+        else if ((unsigned long)(nowUs - echoStartUs) >=
+                 ULTRA_TIMEOUT_US)
+        {
+          rightDistance = -1.0f;
+
+          echoStartUs = 0;
+
+          nextUltraUs = micros() + ULTRA_GAP_US;
+
+          ultraState = ULTRA_IDLE;
+        }
+      }
+
+      break;
+  }
 }
 
-
 // ============================================================
-// SEND SENSOR DATA
+// DHT SERVICE
 // ============================================================
 
-void sendSensorData()
+void serviceDHT()
 {
-  Bluetooth.print("TEMP=");
+  unsigned long now = millis();
+
+  if ((unsigned long)(now - lastDhtUpdateMs) <
+      DHT_UPDATE_MS)
+  {
+    return;
+  }
+
+  lastDhtUpdateMs = now;
+
+  /*
+    The standard DHT library uses timing-sensitive communication
+    internally. It is called only every 2 seconds.
+
+    Since your DHT22 is disconnected right now, TEMP/HUM remain
+    at their initialized 0.00 values.
+  */
+
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+
+  if (!isnan(t) && !isnan(h))
+  {
+    temperature = t;
+    humidity = h;
+
+    dhtValid = true;
+  }
+}
+
+// ============================================================
+// SENSOR UPDATE + TELEMETRY
+// ============================================================
+
+void serviceSensors()
+{
+  if (fullControlActive)
+  {
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if ((unsigned long)(now - lastSensorUpdateMs) <
+      SENSOR_UPDATE_MS)
+  {
+    return;
+  }
+
+  lastSensorUpdateMs = now;
+
+  // ----------------------------------------------------------
+  // MQ4 - cheap/non-blocking
+  // ----------------------------------------------------------
+
+  mq4Analog = analogRead(MQ4_ANALOG);
+  mq4Digital = digitalRead(MQ4_DIGITAL);
+
+  // ----------------------------------------------------------
+  // TELEMETRY PRIORITY RULE
+  // ----------------------------------------------------------
+  //
+  // If rover is currently moving or a control packet was just
+  // received, DO NOT transmit sensor telemetry.
+  //
+  // If the last command is a STOP/idle command, telemetry may
+  // resume.
+  //
+
+  if (movementActive)
+  {
+    return;
+  }
+
+  // Never begin a SoftwareSerial TX while bytes are waiting in RX.
+  if (Bluetooth.available())
+  {
+    return;
+  }
+
+  if ((unsigned long)(now - lastCommandActivityMs) <
+      COMMAND_TRAFFIC_IDLE_MS)
+  {
+    return;
+  }
+
+  if ((unsigned long)(now - lastTelemetryMs) <
+      TELEMETRY_MS)
+  {
+    return;
+  }
+
+  lastTelemetryMs = now;
+
+  sendTelemetry();
+}
+
+// ============================================================
+// SEND TELEMETRY
+// ============================================================
+
+void sendTelemetry()
+{
+  /*
+    Compact packet reduces serial airtime.
+
+    At 9600 baud, keeping packets short is important.
+  */
+
+  Bluetooth.print("S,");
+
   Bluetooth.print(temperature, 2);
+  Bluetooth.print(",");
 
-  Bluetooth.print(",HUMIDITY=");
   Bluetooth.print(humidity, 2);
+  Bluetooth.print(",");
 
-  Bluetooth.print(",MQ4_ANALOG=");
-  Bluetooth.print(mq4AnalogValue);
+  Bluetooth.print(mq4Analog);
+  Bluetooth.print(",");
 
-  Bluetooth.print(",MQ4_DIGITAL=");
-  Bluetooth.print(mq4DigitalValue);
+  Bluetooth.print(mq4Digital);
+  Bluetooth.print(",");
 
-  Bluetooth.print(",LEFT_DISTANCE=");
-  Bluetooth.print(leftDistance, 2);
+  Bluetooth.print(leftDistance, 1);
+  Bluetooth.print(",");
 
-  Bluetooth.print(",RIGHT_DISTANCE=");
-  Bluetooth.println(rightDistance, 2);
+  Bluetooth.print(rightDistance, 1);
+
+  Bluetooth.print("\n");
 }
 
-
 // ============================================================
-// USB DEBUG SENSOR DATA
+// MOTOR FAILSAFE
 // ============================================================
 
-void sendSensorDataUSB()
+void serviceMotorFailsafe()
 {
+  unsigned long now = millis();
+
+  if (!motorsRunning)
+    return;
+
+  if ((unsigned long)(now - lastValidCommandMs) >
+      MOTOR_FAILSAFE_MS)
+  {
+    commandX = 0.0f;
+    commandY = 0.0f;
+
+    stopMotors();
+
+    Serial.print("MOTOR_FAILSAFE_STOP t=");
+    Serial.println(now);
+  }
+}
+
+// ============================================================
+// USB DEBUG
+// ============================================================
+
+void serviceDebug()
+{
+  unsigned long now = millis();
+
+  if ((unsigned long)(now - lastDebugMs) <
+      DEBUG_UPDATE_MS)
+  {
+    return;
+  }
+
+  lastDebugMs = now;
+
   Serial.print("TEMP=");
   Serial.print(temperature, 2);
 
-  Serial.print(",HUMIDITY=");
+  Serial.print(" HUM=");
   Serial.print(humidity, 2);
 
-  Serial.print(",MQ4_ANALOG=");
-  Serial.print(mq4AnalogValue);
+  Serial.print(" MQ4=");
+  Serial.print(mq4Analog);
 
-  Serial.print(",MQ4_DIGITAL=");
-  Serial.print(mq4DigitalValue);
+  Serial.print(" DIG=");
+  Serial.print(mq4Digital);
 
-  Serial.print(",LEFT_DISTANCE=");
-  Serial.print(leftDistance, 2);
+  Serial.print(" L=");
+  Serial.print(leftDistance, 1);
 
-  Serial.print(",RIGHT_DISTANCE=");
-  Serial.println(rightDistance, 2);
+  Serial.print(" R=");
+  Serial.print(rightDistance, 1);
+
+  Serial.print(" SPEED=");
+  Serial.print((int)currentSpeedMode);
+
+  Serial.print(" MOVING=");
+  Serial.println(movementActive ? 1 : 0);
 }
-
-
-// ============================================================
-// READ SENSORS
-// ============================================================
-
-void readSensors()
-{
-  // ----------------------------------------------------------
-  // MQ4
-  // ----------------------------------------------------------
-
-  mq4AnalogValue = analogRead(MQ4_PIN);
-
-  mq4DigitalValue = digitalRead(MQ4_DO_PIN);
-
-
-  // ----------------------------------------------------------
-  // DHT22
-  // ----------------------------------------------------------
-
-  if (millis() - lastDHTTime >= DHT_INTERVAL)
-  {
-    lastDHTTime = millis();
-
-    float h = dht.readHumidity();
-    float t = dht.readTemperature();
-
-    if (!isnan(h) && !isnan(t))
-    {
-      humidity = h;
-      temperature = t;
-    }
-  }
-
-
-  // ----------------------------------------------------------
-  // LEFT ULTRASONIC
-  // ----------------------------------------------------------
-
-  leftDistance =
-    readUltrasonic(
-      LEFT_TRIG_PIN,
-      LEFT_ECHO_PIN
-    );
-
-
-  // ----------------------------------------------------------
-  // IMPORTANT:
-  // Check Bluetooth again immediately after LEFT sensor.
-  // ----------------------------------------------------------
-
-  processBluetooth();
-
-
-  // ----------------------------------------------------------
-  // RIGHT ULTRASONIC
-  // ----------------------------------------------------------
-
-  rightDistance =
-    readUltrasonic(
-      RIGHT_TRIG_PIN,
-      RIGHT_ECHO_PIN
-    );
-
-
-  // ----------------------------------------------------------
-  // SEND SENSOR PACKET
-  // ----------------------------------------------------------
-
-  sendSensorData();
-
-  sendSensorDataUSB();
-}
-
 
 // ============================================================
 // SETUP
@@ -653,59 +1225,11 @@ void setup()
 
   Serial.begin(115200);
 
-
   // ----------------------------------------------------------
   // HC-05
   // ----------------------------------------------------------
 
   Bluetooth.begin(BT_BAUD);
-
-
-  // ----------------------------------------------------------
-  // MQ4
-  // ----------------------------------------------------------
-
-  pinMode(
-    MQ4_DO_PIN,
-    INPUT
-  );
-
-
-  // ----------------------------------------------------------
-  // ULTRASONIC
-  // ----------------------------------------------------------
-
-  pinMode(
-    LEFT_TRIG_PIN,
-    OUTPUT
-  );
-
-  pinMode(
-    LEFT_ECHO_PIN,
-    INPUT
-  );
-
-  pinMode(
-    RIGHT_TRIG_PIN,
-    OUTPUT
-  );
-
-  pinMode(
-    RIGHT_ECHO_PIN,
-    INPUT
-  );
-
-
-  digitalWrite(
-    LEFT_TRIG_PIN,
-    LOW
-  );
-
-  digitalWrite(
-    RIGHT_TRIG_PIN,
-    LOW
-  );
-
 
   // ----------------------------------------------------------
   // DHT
@@ -713,6 +1237,25 @@ void setup()
 
   dht.begin();
 
+  // ----------------------------------------------------------
+  // MQ4
+  // ----------------------------------------------------------
+
+  pinMode(MQ4_ANALOG, INPUT);
+  pinMode(MQ4_DIGITAL, INPUT);
+
+  // ----------------------------------------------------------
+  // ULTRASONIC
+  // ----------------------------------------------------------
+
+  pinMode(LEFT_TRIG, OUTPUT);
+  pinMode(LEFT_ECHO, INPUT);
+
+  pinMode(RIGHT_TRIG, OUTPUT);
+  pinMode(RIGHT_ECHO, INPUT);
+
+  digitalWrite(LEFT_TRIG, LOW);
+  digitalWrite(RIGHT_TRIG, LOW);
 
   // ----------------------------------------------------------
   // MOTORS
@@ -720,41 +1263,50 @@ void setup()
 
   stopMotors();
 
+  currentSpeedMode = SPEED_NORMAL;
+
+  commandX = 0.0f;
+  commandY = 0.0f;
+
+  unsigned long now = millis();
+
+  lastValidCommandMs = now;
+  lastCommandActivityMs = 0;
+
+  lastSensorUpdateMs = now;
+  lastTelemetryMs = 0;
+  lastDhtUpdateMs = now;
+  lastDebugMs = now;
+
+  nextUltraUs = micros() + 1000UL;
+  ultraState = ULTRA_IDLE;
+  echoStartUs = 0;
 
   // ----------------------------------------------------------
-  // TIMERS
-  // ----------------------------------------------------------
-
-  lastCommandTime = millis();
-
-  lastSensorTime = millis();
-
-  lastDHTTime = millis();
-
-
-  // ----------------------------------------------------------
-  // STARTUP
+  // STARTUP MESSAGE
   // ----------------------------------------------------------
 
   Serial.println();
   Serial.println("========================================");
-  Serial.println("DRILLPULSE REALTIME ARDUINO");
+  Serial.println(" DRILLPULSE PRIORITY CONTROLLER");
   Serial.println("========================================");
-  Serial.println("HC-05: D10/D11");
-  Serial.println("BAUD: 9600");
-  Serial.println("COMMAND PARSER: NON-BLOCKING");
+  Serial.println("HC-05 @ 9600");
+  Serial.println("RX D10 / TX D11");
+  Serial.println();
+  Serial.println("MOTOR CONTROL = HIGH PRIORITY");
+  Serial.println("SENSOR TX = ONLY WHEN MOTOR CONTROL IDLE");
+  Serial.println("0 = SLOW");
+  Serial.println("1 = NORMAL");
+  Serial.println("2 = TURBO");
+  Serial.println();
+  Serial.println("No delay()");
+  Serial.println("No pulseIn()");
+  Serial.println("No readStringUntil()");
+  Serial.println();
+  Serial.println("Motor failsafe = 450 ms");
+  Serial.println("Sensor telemetry = 100 ms when idle");
   Serial.println("========================================");
-
-
-  Bluetooth.println("DRILLPULSE ARDUINO READY");
-
-  Bluetooth.println("HC-05 CONNECTED");
-
-  Bluetooth.println("BAUD=9600");
-
-  sendSpeedStatus();
 }
-
 
 // ============================================================
 // MAIN LOOP
@@ -762,44 +1314,39 @@ void setup()
 
 void loop()
 {
-  // ==========================================================
-  // PRIORITY #1
-  // BLUETOOTH
-  // ==========================================================
+  /*
+    IMPORTANT EXECUTION ORDER
 
-  // This is ALWAYS first.
+    1. Receive Bluetooth first.
+    2. Apply motor command immediately.
+    3. Continue ultrasonic state machine.
+    4. Update DHT slowly.
+    5. Read MQ4.
+    6. Send sensors only when motor control is idle.
+    7. Run motor emergency watchdog.
+  */
 
-  processBluetooth();
+  serviceBluetoothRx();
 
+  // Safety must run before any sensor work, including DHT sampling.
+  serviceMotorFailsafe();
 
-  // ==========================================================
-  // PRIORITY #2
-  // SAFETY STOP
-  // ==========================================================
-
-  if (
-    millis() - lastCommandTime >
-    COMMAND_TIMEOUT
-  )
+  if (!fullControlActive)
   {
-    stopMotors();
-  }
+    serviceUltrasonic();
 
+    // The DHT library uses timing-sensitive reads internally. Do not
+    // invoke it while the rover is under active motor control.
+    if (!movementActive &&
+        !Bluetooth.available() &&
+        (unsigned long)(millis() - lastCommandActivityMs) >=
+            COMMAND_TRAFFIC_IDLE_MS)
+    {
+      serviceDHT();
+    }
 
-  // ==========================================================
-  // PRIORITY #3
-  // SENSORS
-  // ==========================================================
+    serviceSensors();
 
-  if (
-    millis() - lastSensorTime >=
-    SENSOR_INTERVAL
-  )
-  {
-    lastSensorTime = millis();
-
-    readSensors();
+    serviceDebug();
   }
 }
-
-

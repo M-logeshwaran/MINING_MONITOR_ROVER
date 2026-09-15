@@ -160,6 +160,23 @@
       </div>
     </section>
 
+    <section class="panel glass telemetry-panel" data-panel="navigation_state" data-title="Navigation State">
+      <header class="panel-head" draggable="true">
+        <h2>Navigation State</h2>
+        <span class="badge" data-badge="navigation_state">waiting</span>
+      </header>
+      <div class="panel-body telemetry-body">
+        <div class="telemetry-grid">
+          <div class="telemetry-item"><span>Full control</span><b id="val-full_control">OFF</b><small>priority</small></div>
+          <div class="telemetry-item"><span>Rollback</span><b id="val-rollback_status">IDLE</b><small id="val-rollback_progress">0%</small></div>
+          <div class="telemetry-item"><span>Autonomous</span><b id="val-autonomous_status">MANUAL</b><small>point-to-point</small></div>
+          <div class="telemetry-item"><span>Pose</span><b id="val-pose">0.00, 0.00</b><small>m</small></div>
+          <div class="telemetry-item"><span>Heading</span><b id="val-heading">0.0</b><small>degrees</small></div>
+          <div class="telemetry-item"><span>Path length</span><b id="val-path_length">0.00</b><small>m</small></div>
+        </div>
+      </div>
+    </section>
+
     <section class="panel glass" data-panel="joystick_values" data-title="Joystick">
       <header class="panel-head" draggable="true">
         <h2>Joystick</h2>

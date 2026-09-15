@@ -9,12 +9,22 @@ polling.
 
 | Topic              | Type                              | Shown as               |
 |---------------------|-----------------------------------|-------------------------|
-| `live_feed`          | `sensor_msgs/msg/CompressedImage` | Live camera panel       |
+| `live_feed`          | `sensor_msgs/msg/Image`            | Live camera panel       |
 | `thermal_feed`       | `sensor_msgs/msg/CompressedImage` | Thermal camera panel    |
+| `live_marked_feed`   | `sensor_msgs/msg/CompressedImage` | Annotated live panel    |
 | `temperature`        | `std_msgs/msg/Float32`            | Radial gauge (°C)       |
 | `humidity`           | `std_msgs/msg/Float32`            | Radial gauge (%RH)      |
-| `gas_reading`        | `std_msgs/msg/Float32`            | Radial gauge (ppm)      |
+| `gas_reading`        | `std_msgs/msg/Int32`               | Radial gauge (raw MQ-4) |
+| `gas_status`         | `std_msgs/msg/Int32`               | Gas alarm state         |
+| `left_distance`      | `std_msgs/msg/Float32`             | Left ultrasonic (cm)    |
+| `right_distance`     | `std_msgs/msg/Float32`             | Right ultrasonic (cm)   |
+| `speed_mode`         | `std_msgs/msg/Int8`                | Speed mode              |
 | `joystick_values`    | `sensor_msgs/msg/Joy`             | Live stick position     |
+| `rollback_status`    | `std_msgs/msg/String`             | Rollback state/progress |
+| `autonomous_status`  | `std_msgs/msg/String`             | Point-to-point state    |
+| `full_control`       | `std_msgs/msg/Bool`               | Sensor-priority mode    |
+| `virtual_odom`       | `nav_msgs/msg/Odometry`           | Pose and heading        |
+| `virtual_path`       | `nav_msgs/msg/Path`               | Traveled path           |
 
 If your real rover publishes different types (e.g. raw `sensor_msgs/Image`
 instead of `CompressedImage`, or a custom gas-sensor message), edit the

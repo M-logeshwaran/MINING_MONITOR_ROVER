@@ -44,8 +44,12 @@ Map keyboard:
 
 Bluetooth protocol is unchanged:
     /dev/rfcomm0 @ 9600 baud
-    CMD,X,Y\\n
-    SPEED,n\\n
+    CMD,X,Y,SPEED\\n
+
+    Arduino telemetry:
+        S,TEMP,HUMIDITY,MQ4_ANALOG,MQ4_DIGITAL,LEFT_DISTANCE,RIGHT_DISTANCE\\n
+        Legacy labeled telemetry is also accepted.
+
 Motor mapping is unchanged:
     M1/M2 = left side, M3/M4 = right side
     Forward  = all +
@@ -64,11 +68,12 @@ import serial
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Int8, Int32, Float32, String
+from std_msgs.msg import Bool, Int8, Int32, Float32, String
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
 from std_srvs.srv import Trigger
@@ -99,9 +104,16 @@ class BluetoothManager:
         self.last_rx_time = 0.0
         self.rx_buffer = ''
         self._latest_command = None
-        self._latest_speed = None
+        self._priority_command = None
         self._tx_event = threading.Event()
         self.rx_callback = None
+        self.tx_sequence = 0
+
+        # 9600-baud HC-05 + Arduino SoftwareSerial:
+        # keep movement traffic conservative while retaining immediate
+        # direction changes and a watchdog keepalive.
+        self.MIN_TX_INTERVAL = 0.045
+        self.last_tx_time = 0.0
 
         self.rx_thread = threading.Thread(
             target=self._rx_loop, name='drillpulse-bt-rx', daemon=True
@@ -114,6 +126,15 @@ class BluetoothManager:
 
     def set_rx_callback(self, callback):
         self.rx_callback = callback
+
+    def discard_pending_rx(self):
+        with self.lock:
+            self.rx_buffer = ''
+            if self.serial is not None:
+                try:
+                    self.serial.reset_input_buffer()
+                except Exception:
+                    pass
 
     def _close_locked(self):
         port = self.serial
@@ -145,7 +166,7 @@ class BluetoothManager:
                 try:
                     self.serial = serial.Serial(
                         port=self.device, baudrate=self.baud,
-                        timeout=0.05, write_timeout=0.20
+                        timeout=0.01, write_timeout=0.08
                     )
                     try:
                         self.serial.reset_input_buffer()
@@ -165,14 +186,15 @@ class BluetoothManager:
                     return False
 
     def queue_command(self, packet):
-        """Replace the previous movement packet; never build a TX backlog."""
+        """Replace the previous movement packet and wake TX immediately."""
         with self.lock:
             self._latest_command = packet
         self._tx_event.set()
 
-    def queue_speed(self, packet):
+    def queue_priority_command(self, packet):
+        """Send a mode packet before the next movement packet."""
         with self.lock:
-            self._latest_speed = packet
+            self._priority_command = packet
         self._tx_event.set()
 
     def send(self, packet):
@@ -182,6 +204,7 @@ class BluetoothManager:
                 return False
             try:
                 self.serial.write(packet.encode('ascii'))
+                self.last_tx_time = time.monotonic()
                 return True
             except Exception as exc:
                 self.last_error = str(exc)
@@ -190,35 +213,49 @@ class BluetoothManager:
                 return False
 
     def safe_stop(self):
-        self.queue_command('CMD,0.000,0.000\n')
+        self.queue_command('CMD,0.000,0.000,1\n')
 
     def _tx_loop(self):
-        # 20 Hz is comfortably faster than the Arduino 600 ms watchdog.
-        period = 0.05
-        next_tick = time.monotonic()
+        """Low-latency event-driven TX.
+
+        IMPORTANT: This thread sends ONLY packets explicitly queued by the
+        control loop. It does NOT retransmit the last packet by itself.
+        The control loop decides when a moving keepalive is needed.
+
+        This prevents the old failure mode where STOP (0,0) was transmitted
+        continuously at 20 Hz while the rover was idle, starving Arduino's
+        SoftwareSerial link and interfering with sensor telemetry.
+        """
+        last_sent_packet = None
+
         while self.running and rclpy.ok():
-            now = time.monotonic()
             if not self.connected:
                 self.connect()
-            packet = None
-            with self.lock:
-                # Speed packets have priority, but only the latest one is kept.
-                if self._latest_speed is not None:
-                    packet = self._latest_speed
-                    self._latest_speed = None
-                else:
-                    # Keep sending the latest motion command. This is the
-                    # Bluetooth watchdog keepalive and prevents stop/start.
-                    packet = self._latest_command
-            if packet is not None and self.connected:
-                self.send(packet)
-            next_tick += period
-            sleep_time = next_tick - time.monotonic()
-            if sleep_time > 0:
-                self._tx_event.wait(min(sleep_time, period))
+                self._tx_event.wait(0.05)
                 self._tx_event.clear()
-            else:
-                next_tick = time.monotonic()
+                continue
+
+            packet = None
+            priority_packet = None
+            with self.lock:
+                priority_packet = self._priority_command
+                current = self._latest_command
+                if priority_packet is None and current is not None and current != last_sent_packet:
+                    packet = current
+
+            if priority_packet is not None and self.send(priority_packet):
+                with self.lock:
+                    if self._priority_command == priority_packet:
+                        self._priority_command = None
+                self._tx_event.set()
+
+            if packet is not None and self.send(packet):
+                last_sent_packet = packet
+
+            # Event-driven: a newly queued direction/speed/keepalive packet
+            # wakes this thread immediately.
+            self._tx_event.wait()
+            self._tx_event.clear()
 
     def _rx_loop(self):
         while self.running and rclpy.ok():
@@ -359,13 +396,14 @@ class DrillPulseRover(Node):
         self.GUI_HZ = 60.0
         self.TELEMETRY_HZ = 10.0
         self.ROLLBACK_HZ = 50.0
-        self.KEEPALIVE_PERIOD = 0.25
+        self.KEEPALIVE_PERIOD = 0.35
 
         self.SPEED_BUTTON = 0
         self.ROLLBACK_BUTTON = 2  # verified from source; pygame is zero-based
         # Autonomous uses the first physically available unused pygame button.
         # Button 0 and Button 2 remain reserved for speed/rollback.
         self.AUTONOMOUS_BUTTON = None
+        self.FULL_CONTROL_BUTTON = None
 
         self.AUTO_HEADING_TOLERANCE = math.radians(6.0)
         self.AUTO_HEADING_REACQUIRE = math.radians(11.0)
@@ -429,6 +467,7 @@ class DrillPulseRover(Node):
         self.autonomous_distance_remaining = 0.0
         self.autonomous_heading_error = 0.0
         self.last_autonomous_button = 0
+        self.full_control_active = False
 
         self.x = 0.0
         self.y = 0.0
@@ -444,6 +483,7 @@ class DrillPulseRover(Node):
         self.m4_rpm = 0.0
         self.linear_velocity = 0.0
         self.angular_velocity = 0.0
+        self.last_odom_time = time.monotonic()
 
         self.exploration_points = deque(
             [(0.0, 0.0, 0.0)],
@@ -468,6 +508,7 @@ class DrillPulseRover(Node):
         self.controller_connected = False
         self.last_speed_button = 0
         self.last_rollback_button = 0
+        self.last_full_control_button = 0
 
         try:
             if pygame.joystick.get_count() > 0:
@@ -500,6 +541,19 @@ class DrillPulseRover(Node):
                         'No unused joystick button available for autonomous mode. '
                         'Use map click + keyboard A instead.'
                     )
+                reserved.add(self.AUTONOMOUS_BUTTON)
+                for idx in range(button_count):
+                    if idx not in reserved:
+                        self.FULL_CONTROL_BUTTON = idx
+                        break
+                if self.FULL_CONTROL_BUTTON is not None:
+                    self.get_logger().info(
+                        f'Button {self.FULL_CONTROL_BUTTON} = FULL CONTROL'
+                    )
+                else:
+                    self.get_logger().warning(
+                        'No unused joystick button available for full control.'
+                    )
             else:
                 self.get_logger().warning(
                     'No USB joystick detected at startup. Control thread will keep trying.'
@@ -514,14 +568,33 @@ class DrillPulseRover(Node):
         self.odom_group = MutuallyExclusiveCallbackGroup()
         self.telemetry_group = MutuallyExclusiveCallbackGroup()
         self.reset_group = MutuallyExclusiveCallbackGroup()
+        state_qos = QoSProfile(depth=1)
+        state_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
 
         self.joy_pub = self.create_publisher(Joy, '/joystick_value', 10)
         self.speed_pub = self.create_publisher(Int8, '/speed_mode', 10)
+        self.motor_left_pub = self.create_publisher(Int32, '/drillpulse/motor_left', 10)
+        self.motor_right_pub = self.create_publisher(Int32, '/drillpulse/motor_right', 10)
         self.odom_pub = self.create_publisher(Odometry, '/virtual_odom', 10)
         self.path_pub = self.create_publisher(Path, '/virtual_path', 10)
         self.rollback_status_pub = self.create_publisher(
             String, '/rollback_status', 10
         )
+        self.autonomous_status_pub = self.create_publisher(
+            String, '/autonomous_status', state_qos
+        )
+        self.full_control_pub = self.create_publisher(
+            Bool, '/full_control', state_qos
+        )
+        full_control_msg = Bool()
+        full_control_msg.data = self.full_control_active
+        self.full_control_pub.publish(full_control_msg)
+        speed_msg = Int8()
+        speed_msg.data = self.speed_mode
+        self.speed_pub.publish(speed_msg)
+        autonomous_status_msg = String()
+        autonomous_status_msg.data = self.autonomous_status
+        self.autonomous_status_pub.publish(autonomous_status_msg)
 
         self.temperature_pub = self.create_publisher(Float32, '/drillpulse/temperature', 10)
         self.humidity_pub = self.create_publisher(Float32, '/drillpulse/humidity', 10)
@@ -579,7 +652,10 @@ class DrillPulseRover(Node):
         self.get_logger().info('==================================================')
         self.get_logger().info('DRILLPULSE HIGH-PERFORMANCE UNIFIED V3')
         self.get_logger().info('Control=50Hz | BT TX=20Hz | BT RX=dedicated | Odom=50Hz | GUI=60Hz')
-        self.get_logger().info('Button 0 = SPEED | Button 2 = ROLLBACK | Button 1 = AUTONOMOUS (if available)')
+        self.get_logger().info(
+            'Button 0 = SPEED | Button 2 = ROLLBACK | '
+            'unused buttons = AUTONOMOUS then FULL CONTROL'
+        )
         self.get_logger().info('Sensors: TEMP/HUMIDITY/MQ4/LEFT+RIGHT ULTRASONIC')
         self.get_logger().info('Camera remains independent on /live_feed')
         self.get_logger().info('==================================================')
@@ -654,11 +730,16 @@ class DrillPulseRover(Node):
                 if self.AUTONOMOUS_BUTTON is not None and n > self.AUTONOMOUS_BUTTON
                 else 0
             )
-            return speed, rollback, auto, buttons
+            full_control = (
+                buttons[self.FULL_CONTROL_BUTTON]
+                if self.FULL_CONTROL_BUTTON is not None and n > self.FULL_CONTROL_BUTTON
+                else 0
+            )
+            return speed, rollback, auto, full_control, buttons
         except Exception as exc:
             self.controller_connected = False
             self.get_logger().warning(f'Joystick button read error: {exc}')
-            return 0, 0, 0, []
+            return 0, 0, 0, 0, []
 
     def control_loop(self):
         """Dedicated 50 Hz high-priority loop; GUI cannot block it."""
@@ -676,7 +757,11 @@ class DrillPulseRover(Node):
                     continue
 
                 x, y = self.get_joystick_xy()
-                speed_button, rollback_button, auto_button, buttons = self.read_buttons()
+                speed_button, rollback_button, auto_button, full_control_button, buttons = self.read_buttons()
+
+                if full_control_button and not self.last_full_control_button:
+                    if not (self.rollback_active or self.autonomous_active):
+                        self.set_full_control(not self.full_control_active)
 
                 # Button 2 rising edge: start/cancel rollback.
                 if rollback_button and not self.last_rollback_button:
@@ -724,6 +809,7 @@ class DrillPulseRover(Node):
 
                 self.last_speed_button = speed_button
                 self.last_control_time = now
+                self.last_full_control_button = full_control_button
 
                 next_tick += period
                 sleep_time = next_tick - time.monotonic()
@@ -757,29 +843,77 @@ class DrillPulseRover(Node):
     # BLUETOOTH / COMMAND STATE
     # =============================================================
 
+    def set_full_control(self, active):
+        active = bool(active)
+        if active == self.full_control_active:
+            return
+        self.full_control_active = active
+        self.bt.discard_pending_rx()
+        self._clear_sensor_state()
+        self.bt.queue_priority_command(f'FULL,{1 if active else 0}\n')
+        msg = Bool()
+        msg.data = active
+        self.full_control_pub.publish(msg)
+        self.get_logger().info(
+            f'FULL CONTROL: {"ON" if active else "OFF"}'
+        )
+
+    def publish_autonomous_status(self):
+        msg = String()
+        with self.lock:
+            msg.data = self.autonomous_status
+        self.autonomous_status_pub.publish(msg)
+
     def _send_motion_if_needed(self, x, y, now, force=False):
+        """Queue one atomic CMD,X,Y,SPEED packet.
+
+        Direction is cardinalized exactly as before. The speed mode is embedded
+        in the same packet, so a speed change while moving cannot be lost behind
+        a separate SPEED packet.
+        """
+        direction = self.command_direction(x, y)
+        tx_x, tx_y = float(direction[0]), float(direction[1])
+        speed = int(self.speed_mode)
+
         changed = (
             self.last_sent_x is None
-            or abs(x - self.last_sent_x) > 0.0005
-            or abs(y - self.last_sent_y) > 0.0005
+            or tx_x != self.last_sent_x
+            or tx_y != self.last_sent_y
+            or self.last_sent_speed is None
+            or speed != self.last_sent_speed
         )
-        keepalive_due = (now - self.last_keepalive) >= self.KEEPALIVE_PERIOD
+        moving = (tx_x != 0.0 or tx_y != 0.0)
+        keepalive_due = moving and ((now - self.last_keepalive) >= self.KEEPALIVE_PERIOD)
 
+        # STOP is event-driven: send it once when the rover becomes stopped,
+        # never repeatedly while the joystick remains centered.
         if force or changed or keepalive_due:
-            packet = f'CMD,{x:.3f},{y:.3f}\n'
-            # Never block the 50 Hz control loop on serial I/O.
+            self.bt.tx_sequence += 1
+            seq = self.bt.tx_sequence
+            packet = f'CMD,{seq},{tx_x:.3f},{tx_y:.3f},{speed}\n'
             self.bt.queue_command(packet)
-            self.last_sent_x = x
-            self.last_sent_y = y
+            # INFO only for a state-change packet; keepalive packets are quiet.
+            if changed or force:
+                self.get_logger().info(
+                    f'BT TX seq={seq} x={tx_x:.0f} y={tx_y:.0f} speed={speed}'
+                )
+            self.last_sent_x = tx_x
+            self.last_sent_y = tx_y
+            self.last_sent_speed = speed
             self.last_keepalive = now
 
     def send_speed_mode(self, mode=None, force=False):
-        if mode is None:
-            mode = self.speed_mode
-        if not force and self.last_sent_speed == mode:
-            return
-        self.bt.queue_speed(f'SPEED,{int(mode)}\n')
-        self.last_sent_speed = int(mode)
+        """Compatibility helper; speed is transported inside CMD."""
+        if mode is not None:
+            mode = int(mode) % 3
+            with self.lock:
+                self.speed_mode = mode
+        if force:
+            self.last_sent_speed = None
+        with self.lock:
+            x = self.joy_x
+            y = self.joy_y
+        self._send_motion_if_needed(x, y, time.monotonic(), force=force)
 
     def stop_rover(self):
         now = time.monotonic()
@@ -794,22 +928,75 @@ class DrillPulseRover(Node):
     # ARDUINO BLUETOOTH RX / SENSOR DATA
     # =============================================================
 
+    def _clear_sensor_state(self):
+        with self.lock:
+            self.temperature = float('nan')
+            self.humidity = float('nan')
+            self.mq4_analog = -1
+            self.mq4_digital = -1
+            self.left_distance = -1.0
+            self.right_distance = -1.0
+            self.sensor_packet_count = 0
+            self.last_sensor_time = 0.0
+            self.last_arduino_status = 'SENSORS_BLOCKED'
+
     def process_bluetooth_message(self, message):
+        """Parse Arduino telemetry/status without blocking the control path.
+
+        Supported sensor formats:
+
+        1) Compact current Arduino format:
+           S,TEMP,HUMIDITY,MQ4_ANALOG,MQ4_DIGITAL,LEFT_DISTANCE,RIGHT_DISTANCE
+
+        2) Legacy labeled format:
+           TEMP=...,HUMIDITY=...,MQ4_ANALOG=...,MQ4_DIGITAL=...,
+           LEFT_DISTANCE=...,RIGHT_DISTANCE=...
+
+        A malformed line is ignored instead of being published as sensor data.
+        """
         message = message.strip()
+
         if not message:
             return
 
-        if message.startswith('TEMP=') and 'HUMIDITY=' in message and 'MQ4_ANALOG=' in message:
-            self.process_sensor_data(message)
+        if self.full_control_active:
             return
 
+        # Current Arduino telemetry format.
+        if message.startswith("S,"):
+            if self.process_compact_sensor_data(message):
+                return
+
+        # Legacy telemetry format.
+        if (
+            message.startswith("TEMP=")
+            and "HUMIDITY=" in message
+            and "MQ4_ANALOG=" in message
+        ):
+            if self.process_sensor_data(message):
+                return
+
+        # Status / acknowledgements.
         self.last_arduino_status = message
-        if message.startswith('ERROR,'):
-            self.get_logger().warning(f'Arduino ERROR: {message}')
-        elif message in ('DRILLPULSE ARDUINO READY', 'HC-05 CONNECTED', 'BAUD=9600'):
-            self.get_logger().info(f'Arduino: {message}')
-        elif message.startswith('SPEED:') or message.startswith('ACK,') or message == 'ARDUINO RESET: OK':
-            self.get_logger().info(f'Arduino: {message}')
+
+        if message.startswith("ERROR,"):
+            # Do not flood the console with malformed serial lines.
+            return
+
+        if message in (
+            "DRILLPULSE ARDUINO READY",
+            "HC-05 CONNECTED",
+            "BAUD=9600",
+            "READY",
+        ):
+            self.get_logger().info(f"Arduino: {message}")
+
+        elif (
+            message.startswith("SPEED:")
+            or message.startswith("ACK,")
+            or message in ("ARDUINO RESET: OK", "RESET_OK")
+        ):
+            self.get_logger().info(f"Arduino: {message}")
 
         try:
             msg = String()
@@ -818,47 +1005,163 @@ class DrillPulseRover(Node):
         except Exception:
             pass
 
+    def _publish_sensor_values(
+        self,
+        temperature,
+        humidity,
+        gas,
+        gas_status,
+        left,
+        right,
+    ):
+        """Store and publish one complete sensor sample."""
+        if self.full_control_active:
+            return False
+
+        # -1.0 is the Arduino's valid 'no ultrasonic echo' value.
+        # Temperature/humidity/gas must be finite.
+        if not math.isfinite(temperature):
+            return False
+        if not math.isfinite(humidity):
+            return False
+        if not math.isfinite(left):
+            return False
+        if not math.isfinite(right):
+            return False
+
+        gas = int(gas)
+        gas_status = int(gas_status)
+
+        with self.lock:
+            self.temperature = float(temperature)
+            self.humidity = float(humidity)
+            self.mq4_analog = gas
+            self.mq4_digital = gas_status
+            self.left_distance = float(left)
+            self.right_distance = float(right)
+
+            self.sensor_packet_count += 1
+            self.last_sensor_time = time.monotonic()
+            self.last_arduino_status = "SENSOR_OK"
+
+        # ---- Temperature ----
+        msg = Float32()
+        msg.data = float(temperature)
+        self.temperature_pub.publish(msg)
+
+        # ---- Humidity ----
+        msg = Float32()
+        msg.data = float(humidity)
+        self.humidity_pub.publish(msg)
+
+        # ---- MQ-4 analog ----
+        msg = Int32()
+        msg.data = gas
+        self.gas_pub.publish(msg)
+
+        # ---- MQ-4 digital ----
+        msg = Int32()
+        msg.data = gas_status
+        self.gas_status_pub.publish(msg)
+
+        # ---- Left ultrasonic ----
+        msg = Float32()
+        msg.data = float(left)
+        self.left_distance_pub.publish(msg)
+
+        # ---- Right ultrasonic ----
+        msg = Float32()
+        msg.data = float(right)
+        self.right_distance_pub.publish(msg)
+
+        return True
+
+    def process_compact_sensor_data(self, message):
+        """Parse: S,TEMP,HUMIDITY,MQ4A,MQ4D,LEFT,RIGHT"""
+        try:
+            parts = [p.strip() for p in message.split(",")]
+
+            # Exactly 7 fields are required:
+            # S + 6 sensor values.
+            if len(parts) != 7 or parts[0] != "S":
+                self.invalid_sensor_packets += 1
+                return False
+
+            temperature = float(parts[1])
+            humidity = float(parts[2])
+            gas = int(float(parts[3]))
+            gas_status = int(float(parts[4]))
+            left = float(parts[5])
+            right = float(parts[6])
+
+            return self._publish_sensor_values(
+                temperature,
+                humidity,
+                gas,
+                gas_status,
+                left,
+                right,
+            )
+
+        except (ValueError, TypeError, IndexError):
+            self.invalid_sensor_packets += 1
+            return False
+        except Exception as exc:
+            self.invalid_sensor_packets += 1
+            self.get_logger().warning(
+                f"Compact sensor packet error: {exc}"
+            )
+            return False
+
     def process_sensor_data(self, message):
+        """Parse legacy labeled sensor telemetry."""
         try:
             values = {}
-            for part in message.split(','):
-                if '=' not in part:
+
+            for part in message.split(","):
+                if "=" not in part:
                     continue
-                key, value = part.split('=', 1)
+
+                key, value = part.split("=", 1)
                 values[key.strip()] = value.strip()
 
-            required = ('TEMP', 'HUMIDITY', 'MQ4_ANALOG', 'MQ4_DIGITAL', 'LEFT_DISTANCE', 'RIGHT_DISTANCE')
+            required = (
+                "TEMP",
+                "HUMIDITY",
+                "MQ4_ANALOG",
+                "MQ4_DIGITAL",
+                "LEFT_DISTANCE",
+                "RIGHT_DISTANCE",
+            )
+
             if not all(k in values for k in required):
                 self.invalid_sensor_packets += 1
                 return False
 
-            temperature = float(values['TEMP'])
-            humidity = float(values['HUMIDITY'])
-            gas = int(float(values['MQ4_ANALOG']))
-            gas_status = int(float(values['MQ4_DIGITAL']))
-            left = float(values['LEFT_DISTANCE'])
-            right = float(values['RIGHT_DISTANCE'])
+            temperature = float(values["TEMP"])
+            humidity = float(values["HUMIDITY"])
+            gas = int(float(values["MQ4_ANALOG"]))
+            gas_status = int(float(values["MQ4_DIGITAL"]))
+            left = float(values["LEFT_DISTANCE"])
+            right = float(values["RIGHT_DISTANCE"])
 
-            with self.lock:
-                self.temperature = temperature
-                self.humidity = humidity
-                self.mq4_analog = gas
-                self.mq4_digital = gas_status
-                self.left_distance = left
-                self.right_distance = right
-                self.sensor_packet_count += 1
-                self.last_sensor_time = time.monotonic()
+            return self._publish_sensor_values(
+                temperature,
+                humidity,
+                gas,
+                gas_status,
+                left,
+                right,
+            )
 
-            m = Float32(); m.data = temperature; self.temperature_pub.publish(m)
-            m = Float32(); m.data = humidity; self.humidity_pub.publish(m)
-            m = Int32(); m.data = gas; self.gas_pub.publish(m)
-            m = Int32(); m.data = gas_status; self.gas_status_pub.publish(m)
-            m = Float32(); m.data = left; self.left_distance_pub.publish(m)
-            m = Float32(); m.data = right; self.right_distance_pub.publish(m)
-            return True
+        except (ValueError, TypeError):
+            self.invalid_sensor_packets += 1
+            return False
         except Exception as exc:
             self.invalid_sensor_packets += 1
-            self.get_logger().warning(f'Sensor packet error: {exc}')
+            self.get_logger().warning(
+                f"Labeled sensor packet error: {exc}"
+            )
             return False
 
     def print_sensor_terminal(self):
@@ -878,7 +1181,7 @@ class DrillPulseRover(Node):
         self.get_logger().info(
             f'SENSORS [{sensor_state}] | TEMP={t:.1f}C | HUM={h:.1f}% | '
             f'MQ4={gas} D={gd} | ULTRA L={left:.1f}cm R={right:.1f}cm | '
-            f'packets={count} | age={age:.2f}s | Arduino={status}'
+            f'packets={count} invalid={self.invalid_sensor_packets} | age={age:.2f}s | Arduino={status}'
         )
 
     # =============================================================
@@ -976,6 +1279,7 @@ class DrillPulseRover(Node):
             self.autonomous_status = 'TARGET SELECTED — PRESS AUTO BUTTON'
             self.autonomous_distance_remaining = math.hypot(tx - self.x, ty - self.y)
             self.autonomous_heading_error = 0.0
+        self.publish_autonomous_status()
         self.get_logger().info(f'AUTONOMOUS TARGET SET: X={tx:.2f} Y={ty:.2f}')
         return True
 
@@ -1005,6 +1309,8 @@ class DrillPulseRover(Node):
             self.autonomous_active = True
             self.autonomous_status = 'AUTONOMOUS ACTIVE'
             self.last_command_time = now
+        self.set_full_control(True)
+        self.publish_autonomous_status()
         # Autonomous uses SLOW for stable demo navigation, then restores the
         # operator-selected mode when navigation finishes/cancels.
         self._set_autonomous_speed_mode(True)
@@ -1043,11 +1349,14 @@ class DrillPulseRover(Node):
                 if self.autonomous_target is not None else 0.0
             )
             self.autonomous_heading_error = 0.0
+        self.publish_autonomous_status()
         if was_active:
             self.recorder.finish(time.monotonic())
             if send_stop:
                 self.stop_rover()
             self._set_autonomous_speed_mode(False)
+            if not self.rollback_active:
+                self.set_full_control(False)
             self.get_logger().warning(str(reason))
 
     def _autonomous_step(self, now):
@@ -1086,6 +1395,7 @@ class DrillPulseRover(Node):
             self.autonomous_status = status
             mode = self.speed_mode
 
+        self.publish_autonomous_status()
         self.recorder.update(self.command_direction(cmd_x, cmd_y), mode, now)
         self._send_motion_if_needed(cmd_x, cmd_y, now, force=False)
 
@@ -1099,8 +1409,10 @@ class DrillPulseRover(Node):
             self.autonomous_heading_error = 0.0
             self.joy_x = self.joy_y = 0.0
             self.last_command_time = now
+        self.publish_autonomous_status()
         self._send_motion_if_needed(0.0, 0.0, now, force=True)
         self._set_autonomous_speed_mode(False)
+        self.set_full_control(False)
         self.get_logger().info('AUTONOMOUS DESTINATION REACHED (VIRTUAL/PREDICTED)')
 
     # =============================================================
@@ -1138,6 +1450,7 @@ class DrillPulseRover(Node):
             self.last_command_time = now
 
         self._send_motion_if_needed(0.0, 0.0, now, force=True)
+        self.set_full_control(True)
         self.get_logger().info(f'AUTO ROLLBACK STARTED — {len(segments)} segments')
         return True
 
@@ -1285,6 +1598,7 @@ class DrillPulseRover(Node):
             self.autonomous_heading_error = 0.0
             self.last_command_time = now
             self.last_odom_time = now
+        self.set_full_control(False)
         self.get_logger().info('ROLLBACK COMPLETE — PATH CLEARED, NEW EXPLORATION STARTED')
 
     def cancel_rollback(self):
@@ -1305,6 +1619,7 @@ class DrillPulseRover(Node):
             self.rollback_path_cursor = -1
             self.rollback_final_correction = False
         self.stop_rover()
+        self.set_full_control(False)
         self.get_logger().warning('AUTO ROLLBACK CANCELLED — RETURNED PATH REMOVED')
 
     def publish_rollback_status(self):
@@ -1320,8 +1635,27 @@ class DrillPulseRover(Node):
                 f'remaining={remaining:.2f}|mode={self.get_speed_mode_name(mode)}'
             )
             self.rollback_status_pub.publish(msg)
+            self.publish_rover_telemetry()
         except Exception as exc:
             self.get_logger().warning(f'Rollback status publish error: {exc}')
+
+    def publish_rover_telemetry(self):
+        with self.lock:
+            speed_mode = int(self.speed_mode)
+            left_rpm = int(round((self.m1_rpm + self.m2_rpm) / 2.0))
+            right_rpm = int(round((self.m3_rpm + self.m4_rpm) / 2.0))
+
+        speed_msg = Int8()
+        speed_msg.data = speed_mode
+        self.speed_pub.publish(speed_msg)
+
+        left_msg = Int32()
+        left_msg.data = left_rpm
+        self.motor_left_pub.publish(left_msg)
+
+        right_msg = Int32()
+        right_msg.data = right_rpm
+        self.motor_right_pub.publish(right_msg)
 
     # =============================================================
     # VIRTUAL ODOMETRY
@@ -1367,9 +1701,16 @@ class DrillPulseRover(Node):
                 distance_delta = abs(linear_velocity * dt)
 
                 self.total_distance += distance_delta
-                self.x += linear_velocity * math.cos(self.theta) * dt
-                self.y += linear_velocity * math.sin(self.theta) * dt
-                self.theta += angular_velocity * dt
+                heading_delta = angular_velocity * dt
+                if abs(angular_velocity) < 1.0e-9:
+                    self.x += linear_velocity * math.cos(self.theta) * dt
+                    self.y += linear_velocity * math.sin(self.theta) * dt
+                else:
+                    radius = linear_velocity / angular_velocity
+                    next_theta = self.theta + heading_delta
+                    self.x += radius * (math.sin(next_theta) - math.sin(self.theta))
+                    self.y += radius * (-math.cos(next_theta) + math.cos(self.theta))
+                self.theta += heading_delta
                 self.theta = math.atan2(math.sin(self.theta), math.cos(self.theta))
                 self.linear_velocity = linear_velocity
                 self.angular_velocity = angular_velocity
