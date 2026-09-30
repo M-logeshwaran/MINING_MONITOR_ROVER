@@ -416,7 +416,7 @@ sequenceDiagram
     Note over Rover,Station: Link State: LORA_ONLY (Wi-Fi disconnected)
     Adapter->>WiFi: Terminate high-bandwidth sockets
     Adapter->>LoRa: Stream critical telemetry only (Tier 0 & 1)
-    LoRa->>Station: Dashboard Map frozen; numerical telemetry active
+    LoRa->>Station: Dashboard Map frozen, numerical telemetry active
 
     Note over Rover,Station: Link State: DISCONNECTED (> 15s silence)
     Rover->>Rover: Onboard Timeout: Abort Mission & Return to Start
