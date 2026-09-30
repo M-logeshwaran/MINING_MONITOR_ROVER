@@ -1,0 +1,8 @@
+std_msgs/Header header
+string current_mode
+bool localization_healthy
+string active_planner
+bool target_reached
+float32 distance_remaining
+int32 active_frontiers
+string status_message

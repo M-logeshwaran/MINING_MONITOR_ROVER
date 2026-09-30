@@ -1,0 +1,9 @@
+std_msgs/Header header
+string link_type
+bool connected
+float32 signal_strength_rssi
+float32 snr_db
+float32 packet_loss_rate
+float32 latency_ms
+int32 packets_sent
+int32 packets_received

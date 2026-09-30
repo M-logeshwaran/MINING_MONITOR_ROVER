@@ -1,0 +1,13 @@
+std_msgs/Header header
+string event_id
+string event_type
+string severity
+string description
+float32 measured_value
+float32 threshold_value
+float32 confidence
+float32 location_x
+float32 location_y
+float32 location_z
+string mission_id
+string audio_reference

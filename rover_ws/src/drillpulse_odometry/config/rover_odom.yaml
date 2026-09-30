@@ -1,0 +1,14 @@
+wheel_odometry_node:
+  ros__parameters:
+    wheel_diameter: 0.22
+    track_width: 0.90
+    filter_alpha: 0.35
+    use_median_filter: true
+    use_arc_integration: true
+    normalize_yaw: true
+    stale_timeout: 1.0
+    odom_frame: "odom"
+    base_frame: "base_link"
+    encoder_topic: "/encoder"
+    odom_topic: "/odom_encoder"
+    publish_tf: false

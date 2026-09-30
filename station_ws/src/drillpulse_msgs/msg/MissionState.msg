@@ -1,0 +1,14 @@
+std_msgs/Header header
+string mission_id
+string current_state
+string active_job
+string current_phase
+float32 progress_percentage
+float32 target_x
+float32 target_y
+float32 current_x
+float32 current_y
+float32 distance_to_target
+bool navigation_active
+int32 discovered_frontiers_count
+string error_message

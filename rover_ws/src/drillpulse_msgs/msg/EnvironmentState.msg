@@ -1,0 +1,11 @@
+std_msgs/Header header
+float32 temperature
+float32 humidity
+float32 methane_ppm
+float32 carbon_monoxide_ppm
+float32 oxygen_percentage
+float32 air_quality_index
+string risk_level
+bool gas_alarm
+float32 rover_x
+float32 rover_y

@@ -1,0 +1,10 @@
+std_msgs/Header header
+bool encoder_valid
+bool imu_valid
+float32 velocity_error
+float32 yaw_rate_error
+float32 yaw_error
+float32 encoder_confidence
+float32 imu_confidence
+string selected_source
+string fusion_state

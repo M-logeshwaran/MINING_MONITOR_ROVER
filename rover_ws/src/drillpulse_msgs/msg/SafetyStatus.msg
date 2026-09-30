@@ -1,0 +1,9 @@
+std_msgs/Header header
+bool emergency_stop_active
+string estop_source
+bool motion_allowed
+bool recovery_allowed
+bool rollover_risk
+bool gas_hazard_critical
+string safety_state
+string fault_code

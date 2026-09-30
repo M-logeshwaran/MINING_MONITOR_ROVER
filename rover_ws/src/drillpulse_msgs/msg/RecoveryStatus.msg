@@ -1,0 +1,10 @@
+std_msgs/Header header
+string state
+string active_side
+float32 current_roll
+float32 current_pitch
+float32 actuator_position
+string actuator_status
+bool fault
+float32 cooldown_remaining
+string message

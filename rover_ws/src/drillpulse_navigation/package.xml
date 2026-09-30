@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>drillpulse_navigation</name>
+  <version>1.0.0</version>
+  <description>Nav2 configuration, AMCL, and SLAM Toolbox integration for DrillPulse Rover</description>
+  <maintainer email="loki@drillpulse.local">DrillPulse Team</maintainer>
+  <license>Apache-2.0</license>
+  <depend>rclpy</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <depend>nav2_bringup</depend>
+  <depend>nav2_controller</depend>
+  <depend>nav2_planner</depend>
+  <depend>nav2_behaviors</depend>
+  <depend>nav2_bt_navigator</depend>
+  <depend>nav2_lifecycle_manager</depend>
+  <depend>nav2_map_server</depend>
+  <depend>nav2_amcl</depend>
+  <depend>slam_toolbox</depend>
+  <depend>drillpulse_msgs</depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

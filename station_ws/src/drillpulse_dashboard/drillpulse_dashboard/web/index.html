@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DRILLPULSE — Mine Safety Rover Dual-Panel Control Center</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- TOP HEADER -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="status-orb" id="linkOrb"></span>
+        <div class="brand-titles">
+          <h1>DRILLPULSE</h1>
+          <span class="sub">AI Underground Mine Safety &amp; Rescue Platform</span>
+        </div>
+      </div>
+
+      <div class="network-cluster">
+        <div class="net-item" id="loraNet">
+          <span class="net-title">LoRa Mesh</span>
+          <span class="net-val" id="loraRssi">-65 dBm</span>
+          <span class="net-sub" id="loraSnr">SNR 9.5 dB</span>
+        </div>
+        <div class="net-item" id="wifiNet">
+          <span class="net-title">WiFi-HaLow</span>
+          <span class="net-val" id="wifiStatus">ONLINE</span>
+          <span class="net-sub">Video Stream</span>
+        </div>
+        <div class="net-item">
+          <span class="net-title">Battery</span>
+          <span class="net-val" id="batteryPct">--%</span>
+          <span class="net-sub" id="roverSpeed">0.0 m/s</span>
+        </div>
+      </div>
+
+      <div class="mission-status-pill">
+        <span class="pill-label">FSM STATE:</span>
+        <span class="pill-val" id="fsmState">INITIALIZING</span>
+      </div>
+
+      <div class="top-actions">
+        <button class="btn btn-report" id="btnGenReport">Audit Report</button>
+        <button class="btn btn-estop" id="btnEstop">EMERGENCY STOP</button>
+      </div>
+    </header>
+
+    <!-- TELEMETRY & MULTI-GAS HUD -->
+    <section class="telemetry-bar">
+      <div class="telem-card" id="cardCh4">
+        <span class="t-label">CH4 Methane</span>
+        <span class="t-val" id="valCh4">0.00 ppm</span>
+        <span class="t-bar"><div class="fill" id="barCh4"></div></span>
+      </div>
+      <div class="telem-card" id="cardCo">
+        <span class="t-label">CO Monoxide</span>
+        <span class="t-val" id="valCo">0.0 ppm</span>
+        <span class="t-bar"><div class="fill" id="barCo"></div></span>
+      </div>
+      <div class="telem-card" id="cardO2">
+        <span class="t-label">O2 Oxygen</span>
+        <span class="t-val" id="valO2">20.9 %</span>
+        <span class="t-bar"><div class="fill" id="barO2" style="width:100%"></div></span>
+      </div>
+      <div class="telem-card">
+        <span class="t-label">Ambient Temp</span>
+        <span class="t-val" id="valTemp">24.0 °C</span>
+        <span class="t-sub" id="valHum">Humidity: 60%</span>
+      </div>
+      <div class="telem-card" id="cardAttitude">
+        <span class="t-label">Attitude (Pitch/Roll)</span>
+        <span class="t-val" id="valAttitude">P: 0.0° | R: 0.0°</span>
+        <span class="t-sub" id="tiltWarning">Normal</span>
+      </div>
+      <div class="telem-card" id="cardOdomDiag">
+        <span class="t-label">Odometry Consistency</span>
+        <span class="t-val" id="valOdomState">CONSISTENT</span>
+        <span class="t-sub" id="valOdomErr">v_err: 0.00 | w_err: 0.00</span>
+      </div>
+    </section>
+
+    <!-- RECOVERY & FAST ACTION ROW -->
+    <section class="recovery-strip">
+      <div class="rec-title">Self-Righting &amp; Obstacle Recovery:</div>
+      <button class="btn btn-rec" id="btnRecSwivel" title="Shortcut: Key 6">
+        <span class="key-badge">Key 6</span> 45° Actuator Swivel
+      </button>
+      <button class="btn btn-rec" id="btnRecExtend" title="Shortcut: Key 7">
+        <span class="key-badge">Key 7</span> Telescoping Extension / Right
+      </button>
+      <div class="rec-status-box">Status: <span id="recStatusText">READY</span></div>
+    </section>
+
+    <!-- DUAL PANELS CONTAINER -->
+    <main class="dual-panels-container">
+
+      <!-- ============================================== -->
+      <!-- PANEL A: EXPLORED MINE AREA                    -->
+      <!-- ============================================== -->
+      <section class="mission-panel" id="panelExplored">
+        <div class="panel-header">
+          <div class="panel-tag">
+            <span class="panel-indicator" id="indExplored"></span>
+            <h2>EXPLORED AREA NAVIGATION</h2>
+          </div>
+          <span class="panel-ack-badge" id="ackExplored">STANDBY</span>
+        </div>
+
+        <div class="panel-body">
+          <div class="panel-canvas-wrap">
+            <canvas id="canvasExplored" width="600" height="400"></canvas>
+            <div class="overlay-disabled" id="overlayExplored">
+              <div class="overlay-card">
+                <h3>PANEL STANDBY / INACTIVE</h3>
+                <p>Explored mode is not currently assigned to the rover.</p>
+                <button class="btn btn-primary" id="btnActivateExplored">ACTIVATE EXPLORED PATROL</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel-controls">
+            <div class="ctrl-group">
+              <label>Waypoint Dispatch (AMCL Safe Corridor):</label>
+              <div class="waypoint-inputs">
+                <input type="number" id="wpX" placeholder="X (m)" step="0.1" value="2.5" />
+                <input type="number" id="wpY" placeholder="Y (m)" step="0.1" value="1.0" />
+                <input type="number" id="wpYaw" placeholder="Yaw (°)" step="5" value="0.0" />
+                <button class="btn btn-primary" id="btnSendWaypoint">Send Waypoint</button>
+              </div>
+            </div>
+            <div class="panel-meta">
+              <span>Pose: <strong id="poseExplored">(0.00, 0.00, 0.0°)</strong></span>
+              <span>Localization: <strong>AMCL / FUSED EKF</strong></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- PANEL B: UNEXPLORED MINE AREA                  -->
+      <!-- ============================================== -->
+      <section class="mission-panel" id="panelUnexplored">
+        <div class="panel-header">
+          <div class="panel-tag">
+            <span class="panel-indicator" id="indUnexplored"></span>
+            <h2>UNEXPLORED AREA EXPLORATION</h2>
+          </div>
+          <span class="panel-ack-badge" id="ackUnexplored">STANDBY</span>
+        </div>
+
+        <div class="panel-body">
+          <div class="panel-canvas-wrap">
+            <canvas id="canvasUnexplored" width="600" height="400"></canvas>
+            <div class="overlay-disabled" id="overlayUnexplored">
+              <div class="overlay-card">
+                <h3>PANEL STANDBY / INACTIVE</h3>
+                <p>Unexplored frontier exploration is not active.</p>
+                <button class="btn btn-primary" id="btnActivateUnexplored">ACTIVATE UNEXPLORED EXPLORATION</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel-controls">
+            <div class="ctrl-group">
+              <label>Autonomous Frontier Discovery:</label>
+              <div class="frontier-stats">
+                <span class="f-box">Discovered Frontiers: <strong id="frontiersCount">0</strong></span>
+                <span class="f-box">SLAM Mapping: <strong>SLAM TOOLBOX ACTIVE</strong></span>
+              </div>
+            </div>
+            <div class="panel-meta">
+              <span>Pose: <strong id="poseUnexplored">(0.00, 0.00, 0.0°)</strong></span>
+              <span>Frontier Strategy: <strong>Cost-Distance-Information Gain</strong></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- VIDEO & HAZARDS FOOTER DOCK -->
+    <footer class="bottom-dock">
+      <div class="feed-box">
+        <div class="feed-label">RGB Optical Stream (WiFi-HaLow)</div>
+        <img id="liveFeedImg" alt="Optical Feed" />
+      </div>
+      <div class="feed-box">
+        <div class="feed-label">FLIR Thermal Stream (Heat Anomaly)</div>
+        <img id="thermalFeedImg" alt="Thermal Feed" />
+      </div>
+      <div class="hazard-log-box">
+        <div class="feed-label">Hazard &amp; Incident Journal</div>
+        <ul id="hazardList">
+          <li class="empty-hint">No critical mine hazards detected.</li>
+        </ul>
+      </div>
+    </footer>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

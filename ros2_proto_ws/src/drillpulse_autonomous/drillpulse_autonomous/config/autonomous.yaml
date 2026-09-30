@@ -1,0 +1,33 @@
+drillpulse_autonomous:
+  ros__parameters:
+    # ROS Topics
+    camera_topic: "/camera/image_raw"
+    left_ultrasonic_topic: "/left_distance"
+    right_ultrasonic_topic: "/right_distance"
+    motor_command_topic: "/rover/command"
+    speed_mode_topic: "/speed_mode"
+
+    # Motor & Speed Settings
+    default_speed: 1
+    max_speed: 3
+
+    # Ultrasonic Thresholds (in cm)
+    critical_stop_distance: 15.0
+    warning_distance: 25.0
+    safe_distance: 35.0
+
+    # Vision & OpenCV Pipeline Settings
+    canny_threshold_low: 50
+    canny_threshold_high: 150
+    frame_width: 640
+    frame_height: 480
+    fps: 20
+
+    # State & Recovery Timers (in seconds)
+    reverse_duration: 1.5
+    turn_duration: 1.0
+    recovery_timeout: 5.0
+
+    # Environment & Hardware Settings
+    simulation: true
+    webcam_id: 0
